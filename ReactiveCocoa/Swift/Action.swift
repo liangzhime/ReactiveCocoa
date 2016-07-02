@@ -91,7 +91,7 @@ public final class Action<Input, Output, Error: ErrorType> {
 	/// be sent upon `values` or `errors` for that particular signal.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func apply(input: Input) -> SignalProducer<Output, ActionError<Error>> {
-		return SignalProducer { observer, disposable in
+		return SignalProducer { observer, disposalTrigger in
 			var startedExecuting = false
 
 			dispatch_sync(self.executingQueue) {
@@ -106,8 +106,8 @@ public final class Action<Input, Output, Error: ErrorType> {
 				return
 			}
 
-			self.executeClosure(input).startWithSignal { signal, signalDisposable in
-				disposable.addDisposable(signalDisposable)
+			self.executeClosure(input).startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
 
 				signal.observe { event in
 					observer.action(event.mapError(ActionError.ProducerError))
@@ -115,7 +115,7 @@ public final class Action<Input, Output, Error: ErrorType> {
 				}
 			}
 
-			disposable += {
+			disposalTrigger.observeTerminated {
 				self._executing.value = false
 			}
 		}

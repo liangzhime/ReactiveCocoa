@@ -401,7 +401,7 @@ public struct AnyProperty<Value>: PropertyType {
 	private init(propertyProducer: SignalProducer<Value, NoError>, capturing sources: [Any]) {
 		var value: Value!
 
-		let observerDisposable = propertyProducer.start { event in
+		let interrupter = propertyProducer.start { event in
 			switch event {
 			case let .Next(newValue):
 				value = newValue
@@ -415,7 +415,7 @@ public struct AnyProperty<Value>: PropertyType {
 		}
 
 		if value != nil {
-			disposable = ScopedDisposable(observerDisposable)
+			disposable = ScopedDisposable(ActionDisposable { interrupter.dispose() })
 			self.sources = sources
 
 			_value = { value }
@@ -494,11 +494,11 @@ public final class MutableProperty<Value>: MutablePropertyType {
 	/// followed by all changes over time, then complete when the property has
 	/// deinitialized.
 	public var producer: SignalProducer<Value, NoError> {
-		return SignalProducer { [box, weak self] producerObserver, producerDisposable in
+		return SignalProducer { [box, weak self] producerObserver, disposalTrigger in
 			if let strongSelf = self {
 				strongSelf.withValue { value in
 					producerObserver.sendNext(value)
-					producerDisposable += strongSelf.signal.observe(producerObserver)
+					strongSelf.signal.takeUntil(disposalTrigger).observe(producerObserver)
 				}
 			} else {
 				/// As the setter would have been deinitialized with the property,
@@ -572,24 +572,25 @@ infix operator <~ {
 ///
 /// The binding will automatically terminate when the property is deinitialized,
 /// or when the signal sends a `Completed` event.
-public func <~ <P: MutablePropertyType>(property: P, signal: Signal<P.Value, NoError>) -> Disposable {
-	let disposable = CompositeDisposable()
-	disposable += property.producer.startWithCompleted {
-		disposable.dispose()
-	}
+public func <~ <P: MutablePropertyType>(property: P, signal: Signal<P.Value, NoError>) {
+	let termination = Signal<(), NoError>.pipe()
 
-	disposable += signal.observe { [weak property] event in
+	let observer = Observer<P.Value, NoError> { [weak property] event in
 		switch event {
 		case let .Next(value):
 			property?.value = value
 		case .Completed:
-			disposable.dispose()
+			termination.observer.sendCompleted()
 		case .Failed, .Interrupted:
 			break
 		}
 	}
 
-	return disposable
+	property.signal.observeCompleted {
+		termination.observer.sendCompleted()
+	}
+
+	signal.observe(until: termination.signal, observer: observer)
 }
 
 /// Creates a signal from the given producer, which will be immediately bound to
@@ -599,22 +600,19 @@ public func <~ <P: MutablePropertyType>(property: P, signal: Signal<P.Value, NoE
 /// The binding will automatically terminate when the property is deinitialized,
 /// or when the created signal sends a `Completed` event.
 public func <~ <P: MutablePropertyType>(property: P, producer: SignalProducer<P.Value, NoError>) -> Disposable {
-	let disposable = CompositeDisposable()
-
-	producer.startWithSignal { signal, signalDisposable in
+	return producer.startWithSignal { signal, interrupter in
 		property <~ signal
-		disposable += signalDisposable
 
-		disposable += property.producer.startWithCompleted {
-			disposable.dispose()
+		property.producer.startWithCompleted {
+			interrupter.dispose()
 		}
-	}
 
-	return disposable
+		return interrupter
+	}
 }
 
-public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value?, S.Error == NoError>(property: P, signal: S) -> Disposable {
-	return property <~ signal.optionalize()
+public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value?, S.Error == NoError>(property: P, signal: S) {
+	property <~ signal.optionalize()
 }
 
 public func <~ <P: MutablePropertyType, S: SignalProducerType where P.Value == S.Value?, S.Error == NoError>(property: P, producer: S) -> Disposable {

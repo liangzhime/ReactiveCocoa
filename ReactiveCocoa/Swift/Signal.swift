@@ -20,19 +20,17 @@ public final class Signal<Value, Error: ErrorType> {
 
 	private let atomicObservers: Atomic<Bag<Observer>?> = Atomic(Bag())
 
+	public var hasTerminated: Bool {
+		return atomicObservers.value == nil
+	}
+
 	/// Initializes a Signal that will immediately invoke the given generator,
 	/// then forward events sent to the given observer.
-	///
-	/// The disposable returned from the closure will be automatically disposed
-	/// if a terminating event is sent to the observer. The Signal itself will
-	/// remain alive until the observer is released.
-	public init(@noescape _ generator: Observer -> Disposable?) {
+	public init(@noescape _ generator: Observer -> Void) {
 
 		/// Used to ensure that events are serialized during delivery to observers.
 		let sendLock = NSLock()
 		sendLock.name = "org.reactivecocoa.ReactiveCocoa.Signal"
-
-		let generatorDisposable = SerialDisposable()
 
 		/// When set to `true`, the Signal should interrupt as soon as possible.
 		let interrupted = Atomic(false)
@@ -51,8 +49,6 @@ public final class Signal<Value, Error: ErrorType> {
 				if sendLock.tryLock() {
 					self.interrupt()
 					sendLock.unlock()
-
-					generatorDisposable.dispose()
 				}
 
 			} else {
@@ -69,29 +65,22 @@ public final class Signal<Value, Error: ErrorType> {
 					}
 
 					sendLock.unlock()
-
-					if event.isTerminating || shouldInterrupt {
-						// Dispose only after notifying observers, so disposal logic
-						// is consistently the last thing to run.
-						generatorDisposable.dispose()
-					}
 				}
 			}
 		}
 
-		generatorDisposable.innerDisposable = generator(observer)
+		generator(observer)
 	}
 
 	/// A Signal that never sends any events to its observers.
 	public static var never: Signal {
-		return self.init { _ in nil }
+		return self.init { _ in }
 	}
 
 	/// A Signal that completes immediately without emitting any value.
 	public static var empty: Signal {
 		return self.init { observer in
 			observer.sendCompleted()
-			return nil
 		}
 	}
 
@@ -100,11 +89,10 @@ public final class Signal<Value, Error: ErrorType> {
 	///
 	/// The Signal will remain alive until a terminating event is sent to the
 	/// observer.
-	public static func pipe() -> (Signal, Observer) {
+	public static func pipe() -> (signal: Signal, observer: Observer) {
 		var observer: Observer!
 		let signal = self.init { innerObserver in
 			observer = innerObserver
-			return nil
 		}
 
 		return (signal, observer)
@@ -123,23 +111,65 @@ public final class Signal<Value, Error: ErrorType> {
 	/// the Signal has already terminated, the observer will immediately receive an
 	/// `Interrupted` event.
 	///
-	/// Returns a Disposable which can be used to disconnect the observer. Disposing
-	/// of the Disposable will have no effect on the Signal itself.
-	public func observe(observer: Observer) -> Disposable? {
+	/// Use `observe(until:observer:endingEvent:)`, `takeUntil` or a `SignalProducer`
+	/// if you need explicit control of the duration of observation.
+	public func observe(observer: Observer) {
+		if observe(removable: observer) == nil {
+			observer.sendInterrupted()
+		}
+	}
+
+	public func observe(until trigger: Signal<(), NoError>, observer: Observer, endingEvent: Event<Value, Error>?) {
+		let atomicTriggerToken = Atomic<RemovalToken?>(nil)
+
+		let wrappedObserver = Observer { [weak trigger] event in
+			observer.action(event)
+
+			if event.isTerminating {
+				if let triggerToken = atomicTriggerToken.swap(nil) {
+					trigger?.removeObserverForToken(triggerToken)
+				}
+			}
+		}
+
+		guard let observerToken = observe(removable: wrappedObserver) else {
+			observer.sendInterrupted()
+			return
+		}
+
+		let triggerObserver = ReactiveCocoa.Observer<(), NoError> { [weak self] event in
+			switch event {
+			case .Next, .Completed:
+				self?.removeObserverForToken(observerToken)
+				_ = endingEvent.map(wrappedObserver.action)
+			case .Failed, .Interrupted:
+				break
+			}
+		}
+
+		guard let triggerToken = trigger.observe(removable: triggerObserver) else {
+			/// The trigger has terminated.
+			observer.sendInterrupted()
+			removeObserverForToken(observerToken)
+			return
+		}
+
+		atomicTriggerToken.value = triggerToken
+	}
+
+	private func observe(removable observer: Observer) -> RemovalToken? {
 		var token: RemovalToken?
+
 		atomicObservers.modify { observers in
 			token = observers?.insert(observer)
 		}
 
-		if let token = token {
-			return ActionDisposable { [weak self] in
-				self?.atomicObservers.modify { observers in
-					observers?.removeValueForToken(token)
-				}
-			}
-		} else {
-			observer.sendInterrupted()
-			return nil
+		return token
+	}
+
+	private func removeObserverForToken(token: RemovalToken) {
+		atomicObservers.modify { observers in
+			observers?.removeValueForToken(token)
 		}
 	}
 }
@@ -155,7 +185,12 @@ public protocol SignalType {
 	var signal: Signal<Value, Error> { get }
 
 	/// Observes the Signal by sending any future events to the given observer.
-	func observe(observer: Signal<Value, Error>.Observer) -> Disposable?
+	func observe(observer: Signal<Value, Error>.Observer)
+
+	/// Observes the Signal by sending any future events to the given observer,
+	/// and detach the observer from the signal when either a `.Next` or a
+	/// `.Completed` event is sent upon `trigger`.
+	func observe(until trigger: Signal<(), NoError>, observer: Signal<Value, Error>.Observer, endingEvent: Event<Value, Error>?)
 }
 
 extension Signal: SignalType {
@@ -165,58 +200,72 @@ extension Signal: SignalType {
 }
 
 extension SignalType {
+	/// Convenience override for observe(until:observer:endingEvent:) to silently
+	/// detach the observer on `.next` or `.completed` events sent upon `trigger`.
+	public func observe(until trigger: Signal<(), NoError>, observer: Observer<Value, Error>) {
+		observe(until: trigger, observer: observer, endingEvent: nil)
+	}
+
+	/// Convenience override for observe(until:observer:endingEvent:) to silently
+	/// detach the observer on `.next` or `.completed` events sent upon `trigger`.
+	public func observe(until trigger: Signal<(), NoError>, _ action: Signal<Value, Error>.Observer.Action) {
+		observe(until: trigger, observer: Observer(action), endingEvent: nil)
+	}
+
 	/// Convenience override for observe(_:) to allow trailing-closure style
 	/// invocations.
-	public func observe(action: Signal<Value, Error>.Observer.Action) -> Disposable? {
-		return observe(Observer(action))
+	public func observe(action: Signal<Value, Error>.Observer.Action) {
+		observe(Observer(action))
 	}
 
 	/// Observes the Signal by invoking the given callback when `next` events are
 	/// received.
-	///
-	/// Returns a Disposable which can be used to stop the invocation of the
-	/// callbacks. Disposing of the Disposable will have no effect on the Signal
-	/// itself.
-	public func observeNext(next: Value -> Void) -> Disposable? {
-		return observe(Observer(next: next))
+	public func observeNext(next: (Value) -> Void) {
+		observe(Observer(next: next))
+	}
+
+	/// Observes the Signal by invoking the given callback when terminating events
+	/// are received.
+	public func observeTerminated(action: () -> Void) {
+		observe { event in
+			if event.isTerminating {
+				action()
+			}
+		}
 	}
 
 	/// Observes the Signal by invoking the given callback when a `completed` event is
 	/// received.
-	///
-	/// Returns a Disposable which can be used to stop the invocation of the
-	/// callback. Disposing of the Disposable will have no effect on the Signal
-	/// itself.
-	public func observeCompleted(completed: () -> Void) -> Disposable? {
-		return observe(Observer(completed: completed))
+	public func observeCompleted(completed: () -> Void) {
+		observe(Observer(completed: completed))
 	}
 	
 	/// Observes the Signal by invoking the given callback when a `failed` event is
 	/// received.
-	///
-	/// Returns a Disposable which can be used to stop the invocation of the
-	/// callback. Disposing of the Disposable will have no effect on the Signal
-	/// itself.
-	public func observeFailed(error: Error -> Void) -> Disposable? {
-		return observe(Observer(failed: error))
+	public func observeFailed(error: (Error) -> Void) {
+		observe(Observer(failed: error))
 	}
 	
 	/// Observes the Signal by invoking the given callback when an `interrupted` event is
 	/// received. If the Signal has already terminated, the callback will be invoked
 	/// immediately.
-	///
-	/// Returns a Disposable which can be used to stop the invocation of the
-	/// callback. Disposing of the Disposable will have no effect on the Signal
-	/// itself.
-	public func observeInterrupted(interrupted: () -> Void) -> Disposable? {
-		return observe(Observer(interrupted: interrupted))
+	public func observeInterrupted(interrupted: () -> Void) {
+		observe(Observer(interrupted: interrupted))
+	}
+
+	/// Observes the Signal by invoking the given disposable when terminating events
+	/// are received.
+	public func observeTerminated(disposable: Disposable) {
+		observeTerminated {
+			disposable.dispose()
+		}
 	}
 
 	/// Maps each value in the signal to a new value.
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func map<U>(transform: Value -> U) -> Signal<U, Error> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				observer.action(event.map(transform))
 			}
 		}
@@ -226,7 +275,7 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func mapError<F>(transform: Error -> F) -> Signal<Value, F> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				observer.action(event.mapError(transform))
 			}
 		}
@@ -236,7 +285,7 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func filter(predicate: Value -> Bool) -> Signal<Value, Error> {
 		return Signal { observer in
-			return self.observe { (event: Event<Value, Error>) -> Void in
+			self.observe { (event: Event<Value, Error>) -> Void in
 				guard let value = event.value else {
 					observer.action(event)
 					return
@@ -268,12 +317,12 @@ extension SignalType {
 		return Signal { observer in
 			if count == 0 {
 				observer.sendCompleted()
-				return nil
+				return
 			}
 
 			var taken = 0
 
-			return self.observe { event in
+			self.observe { event in
 				guard let value = event.value else {
 					observer.action(event)
 					return
@@ -395,7 +444,7 @@ extension SignalType {
 		return Signal { observer in
 			let state = CollectState<Value>()
 
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					state.append(value)
@@ -455,7 +504,7 @@ extension SignalType {
 		return Signal { observer in
 			let state = CollectState<Value>()
 
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					if predicate(values: state.values, next: value) {
@@ -481,7 +530,7 @@ extension SignalType {
 	/// scheduler they originally arrived upon.
 	public func observeOn(scheduler: SchedulerType) -> Signal<Value, Error> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				scheduler.schedule {
 					observer.action(event)
 				}
@@ -496,8 +545,8 @@ private final class CombineLatestState<Value> {
 }
 
 extension SignalType {
-	private func observeWithStates<U>(signalState: CombineLatestState<Value>, _ otherState: CombineLatestState<U>, _ lock: NSLock, _ observer: Signal<(), Error>.Observer) -> Disposable? {
-		return self.observe { event in
+	private func observeWithStates<U>(signalState: CombineLatestState<Value>, _ otherState: CombineLatestState<U>, _ lock: NSLock, _ observer: Signal<(), Error>.Observer, until trigger: Signal<(), NoError>? = nil) {
+		let observer = Observer<Value, Error> { event in
 			switch event {
 			case let .Next(value):
 				lock.lock()
@@ -526,6 +575,12 @@ extension SignalType {
 				observer.sendInterrupted()
 			}
 		}
+
+		if let trigger = trigger {
+			observe(until: trigger, observer: observer)
+		} else {
+			observe(observer)
+		}
 	}
 
 	/// Combines the latest value of the receiver with the latest value from
@@ -540,20 +595,31 @@ extension SignalType {
 			let lock = NSLock()
 			lock.name = "org.reactivecocoa.ReactiveCocoa.combineLatestWith"
 
+			let detachment = Signal<(), NoError>.pipe()
 			let signalState = CombineLatestState<Value>()
 			let otherState = CombineLatestState<U>()
 
-			let onBothNext = {
-				observer.sendNext((signalState.latestValue!, otherState.latestValue!))
+			let observer = Signal<(), Error>.Observer { event in
+				switch event {
+				case .Next:
+					observer.sendNext((signalState.latestValue!, otherState.latestValue!))
+
+				case let .Failed(error):
+					observer.sendFailed(error)
+					detachment.observer.sendCompleted()
+
+				case .Completed:
+					observer.sendCompleted()
+					detachment.observer.sendCompleted()
+
+				case .Interrupted:
+					observer.sendInterrupted()
+					detachment.observer.sendCompleted()
+				}
 			}
 
-			let observer = Signal<(), Error>.Observer(next: onBothNext, failed: observer.sendFailed, completed: observer.sendCompleted, interrupted: observer.sendInterrupted)
-
-			let disposable = CompositeDisposable()
-			disposable += self.observeWithStates(signalState, otherState, lock, observer)
-			disposable += otherSignal.observeWithStates(otherState, signalState, lock, observer)
-			
-			return disposable
+			self.observeWithStates(signalState, otherState, lock, observer)
+			otherSignal.observeWithStates(otherState, signalState, lock, observer, until: detachment.signal)
 		}
 	}
 
@@ -566,7 +632,7 @@ extension SignalType {
 		precondition(interval >= 0)
 
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case .Failed, .Interrupted:
 					scheduler.schedule {
@@ -596,7 +662,7 @@ extension SignalType {
 		return Signal { observer in
 			var skipped = 0
 
-			return self.observe { event in
+			self.observe { event in
 				if case .Next = event where skipped < count {
 					skipped += 1
 				} else {
@@ -617,7 +683,7 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func materialize() -> Signal<Event<Value, Error>, NoError> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				observer.sendNext(event)
 
 				switch event {
@@ -641,7 +707,7 @@ extension SignalType where Value: EventType, Error == NoError {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func dematerialize() -> Signal<Value.Value, Value.Error> {
 		return Signal<Value.Value, Value.Error> { observer in
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(innerEvent):
 					observer.action(innerEvent.event)
@@ -663,13 +729,9 @@ extension SignalType where Value: EventType, Error == NoError {
 extension SignalType {
 	/// Injects side effects to be performed upon the specified signal events.
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
-	public func on(event event: (Event<Value, Error> -> Void)? = nil, failed: (Error -> Void)? = nil, completed: (() -> Void)? = nil, interrupted: (() -> Void)? = nil, terminated: (() -> Void)? = nil, disposed: (() -> Void)? = nil, next: (Value -> Void)? = nil) -> Signal<Value, Error> {
+	public func on(event event: (Event<Value, Error> -> Void)? = nil, failed: (Error -> Void)? = nil, completed: (() -> Void)? = nil, interrupted: (() -> Void)? = nil, terminated: (() -> Void)? = nil, next: (Value -> Void)? = nil) -> Signal<Value, Error> {
 		return Signal { observer in
-			let disposable = CompositeDisposable()
-
-			_ = disposed.map(disposable.addDisposable)
-
-			disposable += signal.observe { receivedEvent in
+			signal.observe { receivedEvent in
 				event?(receivedEvent)
 
 				switch receivedEvent {
@@ -692,8 +754,6 @@ extension SignalType {
 
 				observer.action(receivedEvent)
 			}
-
-			return disposable
 		}
 	}
 }
@@ -718,9 +778,8 @@ extension SignalType {
 	public func sampleWith<T>(sampler: Signal<T, NoError>) -> Signal<(Value, T), Error> {
 		return Signal { observer in
 			let state = Atomic(SampleState<Value>())
-			let disposable = CompositeDisposable()
 
-			disposable += self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					state.modify { st in
@@ -741,7 +800,7 @@ extension SignalType {
 				}
 			}
 			
-			disposable += sampler.observe { event in
+			sampler.observe { event in
 				switch event {
 				case .Next(let samplerValue):
 					if let value = state.value.latestValue {
@@ -761,8 +820,6 @@ extension SignalType {
 					break
 				}
 			}
-
-			return disposable
 		}
 	}
 	
@@ -786,42 +843,28 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func takeUntil(trigger: Signal<(), NoError>) -> Signal<Value, Error> {
 		return Signal { observer in
-			let disposable = CompositeDisposable()
-			disposable += self.observe(observer)
-
-			disposable += trigger.observe { event in
-				switch event {
-				case .Next, .Completed:
-					observer.sendCompleted()
-
-				case .Failed, .Interrupted:
-					break
-				}
-			}
-
-			return disposable
+			self.observe(until: trigger, observer: observer, endingEvent: .Completed)
 		}
 	}
-	
+
 	/// Does not forward any values from `self` until `trigger` sends a Next or
 	/// Completed event, at which point the returned signal behaves exactly like
 	/// `signal`.
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func skipUntil(trigger: Signal<(), NoError>) -> Signal<Value, Error> {
 		return Signal { observer in
-			let disposable = SerialDisposable()
-			
-			disposable.innerDisposable = trigger.observe { event in
+			let detachment = Signal<(), NoError>.pipe()
+
+			trigger.observe(until: detachment.signal) { event in
 				switch event {
 				case .Next, .Completed:
-					disposable.innerDisposable = self.observe(observer)
-					
+					self.observe(observer)
+					detachment.observer.sendCompleted()
+
 				case .Failed, .Interrupted:
 					break
 				}
 			}
-			
-			return disposable
 		}
 	}
 
@@ -864,7 +907,7 @@ extension SignalType {
 		return Signal { observer in
 			var accumulator = initial
 
-			return self.observe { event in
+			self.observe { event in
 				observer.action(event.map { value in
 					accumulator = combine(accumulator, value)
 					return accumulator
@@ -911,7 +954,7 @@ extension SignalType {
 		return Signal { observer in
 			var shouldSkip = true
 
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					shouldSkip = shouldSkip && predicate(value)
@@ -936,9 +979,10 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func takeUntilReplacement(replacement: Signal<Value, Error>) -> Signal<Value, Error> {
 		return Signal { observer in
-			let disposable = CompositeDisposable()
+			var end = Optional(Signal<(), NoError>.pipe())
+			end!.signal.observeCompleted { end = nil }
 
-			let signalDisposable = self.observe { event in
+			self.takeUntil(end!.signal).observe { event in
 				switch event {
 				case .Completed:
 					break
@@ -948,13 +992,10 @@ extension SignalType {
 				}
 			}
 
-			disposable += signalDisposable
-			disposable += replacement.observe { event in
-				signalDisposable?.dispose()
+			replacement.observe { event in
+				end?.observer.sendCompleted()
 				observer.action(event)
 			}
-
-			return disposable
 		}
 	}
 
@@ -966,7 +1007,7 @@ extension SignalType {
 			var buffer: [Value] = []
 			buffer.reserveCapacity(count)
 
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					// To avoid exceeding the reserved capacity of the buffer, we remove then add.
@@ -994,7 +1035,7 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func takeWhile(predicate: Value -> Bool) -> Signal<Value, Error> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				if let value = event.value where !predicate(value) {
 					observer.sendCompleted()
 				} else {
@@ -1020,9 +1061,9 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func zipWith<U>(otherSignal: Signal<U, Error>) -> Signal<(Value, U), Error> {
 		return Signal { observer in
+			let detachment = Signal<(), NoError>.pipe()
 			let state = Atomic(ZipState<Value, U>())
-			let disposable = CompositeDisposable()
-			
+
 			let flush = {
 				var tuple: (Value, U)?
 				var isFinished = false
@@ -1043,13 +1084,21 @@ extension SignalType {
 
 				if isFinished {
 					observer.sendCompleted()
+					detachment.observer.sendCompleted()
 				}
 			}
 			
-			let onFailed = observer.sendFailed
-			let onInterrupted = observer.sendInterrupted
+			let onFailed = { (error: Error) -> Void in
+				observer.sendFailed(error)
+				detachment.observer.sendCompleted()
+			}
 
-			disposable += self.observe { event in
+			let onInterrupted = {
+				observer.sendInterrupted()
+				detachment.observer.sendCompleted()
+			}
+
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					state.modify { state in
@@ -1070,7 +1119,7 @@ extension SignalType {
 				}
 			}
 
-			disposable += otherSignal.observe { event in
+			otherSignal.observe(until: detachment.signal) { event in
 				switch event {
 				case let .Next(value):
 					state.modify { state in
@@ -1090,8 +1139,6 @@ extension SignalType {
 					onInterrupted()
 				}
 			}
-			
-			return disposable
 		}
 	}
 
@@ -1143,42 +1190,46 @@ extension SignalType {
 
 		return Signal { observer in
 			let state: Atomic<ThrottleState<Value>> = Atomic(ThrottleState())
-			let schedulerDisposable = SerialDisposable()
+			let (disposalTrigger, disposalNotifier) = Signal<(), NoError>.pipe()
 
-			let disposable = CompositeDisposable()
-			disposable.addDisposable(schedulerDisposable)
+			disposalTrigger.observeCompleted {
+				var disposable: Disposable?
+				state.modify { currentState in
+					swap(&disposable, &currentState.schedulerDisposable)
+				}
+				disposable?.dispose()
+			}
 
-			disposable += self.observe { event in
+			self.observe { event in
 				guard let value = event.value else {
-					schedulerDisposable.innerDisposable = scheduler.schedule {
+					scheduler.schedule {
 						observer.action(event)
 					}
+					disposalNotifier.sendCompleted()
 					return
 				}
 
 				var scheduleDate: NSDate!
-				state.modify { state in
-					state.pendingValue = value
+				state.modify { currentState in
+					currentState.pendingValue = value
 
-					let proposedScheduleDate = state.previousDate?.dateByAddingTimeInterval(interval) ?? scheduler.currentDate
+					let proposedScheduleDate = currentState.previousDate?.dateByAddingTimeInterval(interval) ?? scheduler.currentDate
 					scheduleDate = proposedScheduleDate.laterDate(scheduler.currentDate)
-				}
 
-				schedulerDisposable.innerDisposable = scheduler.scheduleAfter(scheduleDate) {
-					let previousState = state.modify { state in
-						if state.pendingValue != nil {
-							state.pendingValue = nil
-							state.previousDate = scheduleDate
+					currentState.schedulerDisposable = scheduler.scheduleAfter(scheduleDate) {
+						let previousState = state.modify { state in
+							if state.pendingValue != nil {
+								state.pendingValue = nil
+								state.previousDate = scheduleDate
+							}
 						}
-					}
-					
-					if let pendingValue = previousState.pendingValue {
-						observer.sendNext(pendingValue)
+
+						if let pendingValue = previousState.pendingValue {
+							observer.sendNext(pendingValue)
+						}
 					}
 				}
 			}
-
-			return disposable
 		}
 	}
 
@@ -1252,6 +1303,7 @@ extension SignalType where Value: Hashable {
 private struct ThrottleState<Value> {
 	var previousDate: NSDate? = nil
 	var pendingValue: Value? = nil
+	var schedulerDisposable: Disposable?
 }
 
 /// Combines the values of all the given signals, in the manner described by
@@ -1453,15 +1505,21 @@ extension SignalType {
 		precondition(interval >= 0)
 
 		return Signal { observer in
-			let disposable = CompositeDisposable()
 			let date = scheduler.currentDate.dateByAddingTimeInterval(interval)
 
-			disposable += scheduler.scheduleAfter(date) {
+			let disposable = scheduler.scheduleAfter(date) {
 				observer.sendFailed(error)
 			}
 
-			disposable += self.observe(observer)
-			return disposable
+			let wrappedObserver = Observer<Value, Error> { event in
+				observer.action(event)
+
+				if event.isTerminating {
+					disposable?.dispose()
+				}
+			}
+
+			self.observe(wrappedObserver)
 		}
 	}
 }
@@ -1475,7 +1533,7 @@ extension SignalType where Error == NoError {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func promoteErrors<F: ErrorType>(_: F.Type) -> Signal<Value, F> {
 		return Signal { observer in
-			return self.observe { event in
+			self.observe { event in
 				switch event {
 				case let .Next(value):
 					observer.sendNext(value)

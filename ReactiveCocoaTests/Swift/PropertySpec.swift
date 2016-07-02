@@ -1303,6 +1303,7 @@ class PropertySpec: QuickSpec {
 					expect(mutableProperty.value) == subsequentPropertyValue
 				}
 
+				/**
 				it("should tear down the binding when disposed") {
 					let (signal, observer) = Signal<String, NoError>.pipe()
 
@@ -1336,7 +1337,7 @@ class PropertySpec: QuickSpec {
 
 					mutableProperty = nil
 					expect(bindingDisposable.disposed) == true
-				}
+				}**/
 			}
 
 			describe("from a SignalProducer") {
@@ -1356,31 +1357,36 @@ class PropertySpec: QuickSpec {
 					let signalProducer = SignalProducer<String, NoError>(values: signalValues)
 
 					let mutableProperty = MutableProperty(initialPropertyValue)
-					let disposable = mutableProperty <~ signalProducer
+					let interrupter = mutableProperty <~ signalProducer
 
-					disposable.dispose()
+					interrupter.dispose()
 					// TODO: Assert binding was torn down?
 				}
 
 				it("should tear down the binding when bound signal is completed") {
+					var isDisposed = false
+
 					let (signalProducer, observer) = SignalProducer<String, NoError>.pipe()
 
 					let mutableProperty = MutableProperty(initialPropertyValue)
-					mutableProperty <~ signalProducer
+					mutableProperty <~ signalProducer.on(disposed: { isDisposed = true })
 
 					observer.sendCompleted()
-					// TODO: Assert binding was torn down?
+					expect(isDisposed) == true
 				}
 
 				it("should tear down the binding when the property deallocates") {
+					var isDisposed = false
+
 					let signalValues = [initialPropertyValue, subsequentPropertyValue]
 					let signalProducer = SignalProducer<String, NoError>(values: signalValues)
 
 					var mutableProperty: MutableProperty<String>? = MutableProperty(initialPropertyValue)
-					let disposable = mutableProperty! <~ signalProducer
+					_ = mutableProperty! <~ signalProducer.on(disposed: { isDisposed = true })
 
 					mutableProperty = nil
-					expect(disposable.disposed) == true
+
+					expect(isDisposed) == true
 				}
 			}
 
@@ -1411,8 +1417,8 @@ class PropertySpec: QuickSpec {
 
 					let destinationProperty = MutableProperty("")
 
-					let bindingDisposable = destinationProperty <~ sourceProperty.producer
-					bindingDisposable.dispose()
+					let interrupter = destinationProperty <~ sourceProperty.producer
+					interrupter.dispose()
 
 					sourceProperty.value = subsequentPropertyValue
 
@@ -1430,13 +1436,15 @@ class PropertySpec: QuickSpec {
 				}
 
 				it("should tear down the binding when the destination property deallocates") {
+					var isDisposed = false
+
 					let sourceProperty = MutableProperty(initialPropertyValue)
 					var destinationProperty: MutableProperty<String>? = MutableProperty("")
 
-					let bindingDisposable = destinationProperty! <~ sourceProperty.producer
+					destinationProperty! <~ sourceProperty.producer.on(disposed: { isDisposed = true })
 					destinationProperty = nil
 
-					expect(bindingDisposable.disposed) == true
+					expect(isDisposed) == true
 				}
 			}
 

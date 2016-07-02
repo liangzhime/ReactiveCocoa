@@ -11,10 +11,10 @@ import Foundation
 /// A namespace for logging event types.
 public enum LoggingEvent {
 	public enum Signal: String {
-		case Next, Completed, Failed, Terminated, Disposed, Interrupted
+		case Next, Completed, Failed, Terminated, Interrupted
 
 		public static let allEvents: Set<Signal> = [
-			.Next, .Completed, .Failed, .Terminated, .Disposed, .Interrupted,
+			.Next, .Completed, .Failed, .Terminated, .Interrupted,
 		]
 	}
 
@@ -49,7 +49,6 @@ extension SignalType {
 			completed: log(.Completed),
 			interrupted: log(.Interrupted),
 			terminated: log(.Terminated),
-			disposed: log(.Disposed),
 			next: log(.Next)
 		)
 	}

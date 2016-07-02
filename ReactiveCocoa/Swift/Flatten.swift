@@ -341,36 +341,32 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 	/// emitted from `signal` complete.
 	private func concat() -> Signal<Value.Value, Error> {
 		return Signal<Value.Value, Error> { relayObserver in
-			let disposable = CompositeDisposable()
-			let relayDisposable = CompositeDisposable()
-
-			disposable += relayDisposable
-			disposable += self.observeConcat(relayObserver, relayDisposable)
-
-			return disposable
+			self.observeConcat(relayObserver)
 		}
 	}
 
-	private func observeConcat(observer: Observer<Value.Value, Error>, _ disposable: CompositeDisposable? = nil) -> Disposable? {
-		let state = ConcatState(observer: observer, disposable: disposable)
+	private func observeConcat(observer: Observer<Value.Value, Error>, producerDisposing trigger: Signal<(), NoError>? = nil) {
+		let state = ConcatState(observer: observer)
 
-		return self.observe { event in
+		trigger?.observeCompleted {
+			state.interrupt()
+		}
+
+		self.observe { event in
 			switch event {
 			case let .Next(value):
 				state.enqueueSignalProducer(value.producer)
 
 			case let .Failed(error):
-				observer.sendFailed(error)
+				state.interrupt(error)
 
 			case .Completed:
 				// Add one last producer to the queue, whose sole job is to
 				// "turn out the lights" by completing `observer`.
-				state.enqueueSignalProducer(SignalProducer.empty.on(completed: {
-					observer.sendCompleted()
-				}))
+				state.enqueueCompletionProducer()
 
 			case .Interrupted:
-				observer.sendInterrupted()
+				state.interrupt()
 			}
 		}
 	}
@@ -387,10 +383,10 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// The returned producer completes only when `producer` and all producers
 	/// emitted from `producer` complete.
 	private func concat() -> SignalProducer<Value.Value, Error> {
-		return SignalProducer<Value.Value, Error> { observer, disposable in
-			self.startWithSignal { signal, signalDisposable in
-				disposable += signalDisposable
-				signal.observeConcat(observer, disposable)
+		return SignalProducer<Value.Value, Error> { observer, disposalTrigger in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
+				signal.observeConcat(observer, producerDisposing: disposalTrigger)
 			}
 		}
 	}
@@ -426,22 +422,16 @@ private final class ConcatState<Value, Error: ErrorType> {
 	/// The observer of a started `concat` producer.
 	let observer: Observer<Value, Error>
 
-	/// The top level disposable of a started `concat` producer.
-	let disposable: CompositeDisposable?
-
 	/// The active producer, if any, and the producers waiting to be started.
 	let queuedSignalProducers: Atomic<[SignalProducer<Value, Error>]> = Atomic([])
 
-	init(observer: Signal<Value, Error>.Observer, disposable: CompositeDisposable?) {
+	var currentProducerDisposable: Disposable?
+
+	init(observer: Signal<Value, Error>.Observer) {
 		self.observer = observer
-		self.disposable = disposable
 	}
 
 	func enqueueSignalProducer(producer: SignalProducer<Value, Error>) {
-		if let d = disposable where d.disposed {
-			return
-		}
-
 		var shouldStart = true
 
 		queuedSignalProducers.modify { queue in
@@ -457,10 +447,6 @@ private final class ConcatState<Value, Error: ErrorType> {
 	}
 
 	func dequeueSignalProducer() -> SignalProducer<Value, Error>? {
-		if let d = disposable where d.disposed {
-			return nil
-		}
-
 		var nextSignalProducer: SignalProducer<Value, Error>?
 
 		queuedSignalProducers.modify { queue in
@@ -476,13 +462,13 @@ private final class ConcatState<Value, Error: ErrorType> {
 
 	/// Subscribes to the given signal producer.
 	func startNextSignalProducer(signalProducer: SignalProducer<Value, Error>) {
-		signalProducer.startWithSignal { signal, disposable in
-			let handle = self.disposable?.addDisposable(disposable) ?? nil
+		signalProducer.startWithSignal { signal, interrupter in
+			currentProducerDisposable = interrupter
 
 			signal.observe { event in
 				switch event {
 				case .Completed, .Interrupted:
-					handle?.remove()
+					self.currentProducerDisposable = nil
 
 					if let nextSignalProducer = self.dequeueSignalProducer() {
 						self.startNextSignalProducer(nextSignalProducer)
@@ -494,6 +480,27 @@ private final class ConcatState<Value, Error: ErrorType> {
 			}
 		}
 	}
+
+	func interrupt(error: Error? = nil) {
+		queuedSignalProducers.modify { queue in
+			queue.removeAll()
+		}
+
+		if let error = error {
+			observer.sendFailed(error)
+		} else {
+			observer.sendInterrupted()
+		}
+
+		currentProducerDisposable?.dispose()
+	}
+
+	func enqueueCompletionProducer() {
+		enqueueSignalProducer(SignalProducer.empty.on(completed: {
+			self.observer.sendCompleted()
+			self.currentProducerDisposable?.dispose()
+		}))
+	}
 }
 
 extension SignalType where Value: SignalProducerType, Error == Value.Error {
@@ -501,36 +508,51 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 	/// added earlier. Returns a Signal that will forward events from the inner producers as they arrive.
 	private func merge() -> Signal<Value.Value, Error> {
 		return Signal<Value.Value, Error> { relayObserver in
-			let disposable = CompositeDisposable()
-			let relayDisposable = CompositeDisposable()
-
-			disposable += relayDisposable
-			disposable += self.observeMerge(relayObserver, relayDisposable)
-
-			return disposable
+			self.observeMerge(relayObserver)
 		}
 	}
 
-	private func observeMerge(observer: Observer<Value.Value, Error>, _ disposable: CompositeDisposable) -> Disposable? {
+	private func observeMerge(observer: Observer<Value.Value, Error>, producerDisposing trigger: Signal<(), NoError>? = nil) {
 		let inFlight = Atomic(1)
-		let decrementInFlight = {
-			let orig = inFlight.modify { $0 -= 1 }
-			if orig == 1 {
-				observer.sendCompleted()
+
+		let interrupters = Atomic<Bag<Disposable>?>(Bag())
+
+		func cleanup() {
+			let observers = interrupters.swap(nil)
+			observers?.forEach { interrupter in
+				interrupter.dispose()
 			}
 		}
 
-		return self.observe { event in
+		func decrementInFlight() {
+			let orig = inFlight.modify { $0 -= 1 }
+			if orig == 1 {
+				observer.sendCompleted()
+				cleanup()
+			}
+		}
+
+		trigger?.observeCompleted {
+			cleanup()
+		}
+
+		self.observe { event in
 			switch event {
 			case let .Next(producer):
-				producer.startWithSignal { innerSignal, innerDisposable in
+				producer.startWithSignal { innerSignal, interrupter in
 					inFlight.modify { $0 += 1 }
-					let handle = disposable.addDisposable(innerDisposable)
+
+					var token: RemovalToken?
+					interrupters.modify { bag in
+						token = bag?.insert(interrupter)
+					}
 
 					innerSignal.observe { event in
 						switch event {
 						case .Completed, .Interrupted:
-							handle.remove()
+							interrupters.modify { bag in
+								_ = token.map { bag?.removeValueForToken($0) }
+							}
 							decrementInFlight()
 
 						case .Next, .Failed:
@@ -541,12 +563,14 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 
 			case let .Failed(error):
 				observer.sendFailed(error)
+				cleanup()
 
 			case .Completed:
 				decrementInFlight()
 
 			case .Interrupted:
 				observer.sendInterrupted()
+				cleanup()
 			}
 		}
 	}
@@ -556,13 +580,11 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// Merges a `signal` of SignalProducers down into a single signal, biased toward the producer
 	/// added earlier. Returns a Signal that will forward events from the inner producers as they arrive.
 	private func merge() -> SignalProducer<Value.Value, Error> {
-		return SignalProducer<Value.Value, Error> { relayObserver, disposable in
-			self.startWithSignal { signal, signalDisposable in
-				disposable.addDisposable(signalDisposable)
-
-				signal.observeMerge(relayObserver, disposable)
+		return SignalProducer<Value.Value, Error> { relayObserver, disposalTrigger in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
+				signal.observeMerge(relayObserver, producerDisposing: disposalTrigger)
 			}
-
 		}
 	}
 }
@@ -617,30 +639,41 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 	/// signal have both completed.
 	private func switchToLatest() -> Signal<Value.Value, Error> {
 		return Signal<Value.Value, Error> { observer in
-			let composite = CompositeDisposable()
-			let serial = SerialDisposable()
-
-			composite += serial
-			composite += self.observeSwitchToLatest(observer, serial)
-
-			return composite
+			self.observeSwitchToLatest(observer)
 		}
 	}
 
-	private func observeSwitchToLatest(observer: Observer<Value.Value, Error>, _ latestInnerDisposable: SerialDisposable) -> Disposable? {
+	private func observeSwitchToLatest(observer: Observer<Value.Value, Error>, producerDisposing trigger: Signal<(), NoError>? = nil) {
 		let state = Atomic(LatestState<Value, Error>())
+
+		func cleanup() {
+			var interrupter: Disposable?
+
+			state.modify { latestState in
+				swap(&interrupter, &latestState.interrupter)
+			}
+
+			interrupter?.dispose()
+		}
+
+		trigger?.observeCompleted(cleanup)
 
 		return self.observe { event in
 			switch event {
 			case let .Next(innerProducer):
-				innerProducer.startWithSignal { innerSignal, innerDisposable in
+				innerProducer.startWithSignal { innerSignal, interrupter in
+					var oldDisposable: Disposable?
+
 					state.modify { state in
 						// When we replace the disposable below, this prevents the
 						// generated Interrupted event from doing any work.
 						state.replacingInnerSignal = true
+
+						oldDisposable = interrupter
+						swap(&state.interrupter, &oldDisposable)
 					}
 
-					latestInnerDisposable.innerDisposable = innerDisposable
+					oldDisposable?.dispose()
 
 					state.modify { state in
 						state.replacingInnerSignal = false
@@ -660,6 +693,7 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 
 							if !original.replacingInnerSignal && original.outerSignalComplete {
 								observer.sendCompleted()
+								cleanup()
 							}
 
 						case .Completed:
@@ -669,15 +703,22 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 
 							if original.outerSignalComplete {
 								observer.sendCompleted()
+								cleanup()
 							}
 
-						case .Next, .Failed:
+						case .Next:
 							observer.action(event)
+
+						case .Failed:
+							observer.action(event)
+							cleanup()
 						}
 					}
 				}
 			case let .Failed(error):
 				observer.sendFailed(error)
+				cleanup()
+
 			case .Completed:
 				let original = state.modify { state in
 					state.outerSignalComplete = true
@@ -685,9 +726,12 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 
 				if original.innerSignalComplete {
 					observer.sendCompleted()
+					cleanup()
 				}
+
 			case .Interrupted:
 				observer.sendInterrupted()
+				cleanup()
 			}
 		}
 	}
@@ -703,13 +747,10 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// The returned signal completes when `signal` and the latest inner
 	/// signal have both completed.
 	private func switchToLatest() -> SignalProducer<Value.Value, Error> {
-		return SignalProducer<Value.Value, Error> { observer, disposable in
-			let latestInnerDisposable = SerialDisposable()
-			disposable.addDisposable(latestInnerDisposable)
-
-			self.startWithSignal { signal, signalDisposable in
-				disposable += signalDisposable
-				disposable += signal.observeSwitchToLatest(observer, latestInnerDisposable)
+		return SignalProducer<Value.Value, Error> { observer, disposalTrigger in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
+				signal.observeSwitchToLatest(observer, producerDisposing: disposalTrigger)
 			}
 		}
 	}
@@ -720,6 +761,7 @@ private struct LatestState<Value, Error: ErrorType> {
 	var innerSignalComplete: Bool = true
 	
 	var replacingInnerSignal: Bool = false
+	var interrupter: Disposable?
 }
 
 
@@ -902,18 +944,18 @@ extension SignalType {
 	@warn_unused_result(message="Did you forget to call `observe` on the signal?")
 	public func flatMapError<F>(handler: Error -> SignalProducer<Value, F>) -> Signal<Value, F> {
 		return Signal { observer in
-			self.observeFlatMapError(handler, observer, SerialDisposable())
+			self.observeFlatMapError(handler, observer)
 		}
 	}
 
-	private func observeFlatMapError<F>(handler: Error -> SignalProducer<Value, F>, _ observer: Observer<Value, F>, _ serialDisposable: SerialDisposable) -> Disposable? {
-		return self.observe { event in
+	private func observeFlatMapError<F>(handler: (Error) -> SignalProducer<Value, F>, _ observer: Observer<Value, F>, producerDisposing trigger: Signal<(), NoError>? = nil) {
+		self.observe { event in
 			switch event {
 			case let .Next(value):
 				observer.sendNext(value)
 			case let .Failed(error):
-				handler(error).startWithSignal { signal, disposable in
-					serialDisposable.innerDisposable = disposable
+				handler(error).startWithSignal { signal, interrupter in
+					trigger?.observeTerminated(interrupter)
 					signal.observe(observer)
 				}
 			case .Completed:
@@ -930,14 +972,10 @@ extension SignalProducerType {
 	/// that starts in its place.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func flatMapError<F>(handler: Error -> SignalProducer<Value, F>) -> SignalProducer<Value, F> {
-		return SignalProducer { observer, disposable in
-			let serialDisposable = SerialDisposable()
-			disposable.addDisposable(serialDisposable)
-
-			self.startWithSignal { signal, signalDisposable in
-				serialDisposable.innerDisposable = signalDisposable
-
-				signal.observeFlatMapError(handler, observer, serialDisposable)
+		return SignalProducer { observer, disposalTrigger in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
+				signal.observeFlatMapError(handler, observer, producerDisposing: disposalTrigger)
 			}
 		}
 	}

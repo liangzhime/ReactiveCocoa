@@ -20,7 +20,7 @@ class FoundationExtensionsSpec: QuickSpec {
 				let producer = center.rac_notifications("rac_notifications_test")
 
 				var notif: NSNotification? = nil
-				let disposable = producer.startWithNext { notif = $0 }
+				let interrupter = producer.startWithNext { notif = $0 }
 
 				center.postNotificationName("some_other_notification", object: nil)
 				expect(notif).to(beNil())
@@ -29,7 +29,7 @@ class FoundationExtensionsSpec: QuickSpec {
 				expect(notif?.name) == "rac_notifications_test"
 
 				notif = nil
-				disposable.dispose()
+				interrupter.dispose()
 
 				center.postNotificationName("rac_notifications_test", object: nil)
 				expect(notif).to(beNil())
@@ -41,12 +41,12 @@ class FoundationExtensionsSpec: QuickSpec {
 				observedObject = nil
 
 				var interrupted = false
-				let disposable = producer.startWithInterrupted {
+				let interrupter = producer.startWithInterrupted {
 					interrupted = true
 				}
 				expect(interrupted) == true
 
-				disposable.dispose()
+				interrupter.dispose()
 			}
 
 		}

@@ -31,20 +31,24 @@ class SignalProducerSpec: QuickSpec {
 			}
 
 			it("should release signal observers when given disposable is disposed") {
-				var disposable: Disposable!
+				var trigger: Signal<(), NoError>!
 
-				let producer = SignalProducer<Int, NoError> { observer, innerDisposable in
-					disposable = innerDisposable
+				let producer = SignalProducer<Int, NoError> { observer, disposalTrigger in
+					trigger = disposalTrigger
 
-					innerDisposable.addDisposable {
+					disposalTrigger.observeCompleted {
 						// This is necessary to keep the observer long enough to
 						// even test the memory management.
 						observer.sendNext(0)
 					}
 				}
+			
+				var interrupter: Disposable!
 
 				weak var objectRetainedByObserver: NSObject?
-				producer.startWithSignal { signal, _ in
+				producer.startWithSignal { signal, innerDisposable in
+					interrupter = innerDisposable
+
 					let object = NSObject()
 					objectRetainedByObserver = object
 					signal.observeNext { _ in object }
@@ -52,71 +56,72 @@ class SignalProducerSpec: QuickSpec {
 
 				expect(objectRetainedByObserver).toNot(beNil())
 
-				disposable.dispose()
+				interrupter.dispose()
 				expect(objectRetainedByObserver).to(beNil())
+				expect(trigger.hasTerminated) == true
 			}
 
 			it("should dispose of added disposables upon completion") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 				var observer: Signal<(), NoError>.Observer!
 
-				let producer = SignalProducer<(), NoError>() { incomingObserver, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<(), NoError>() { incomingObserver, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					observer = incomingObserver
 				}
 
 				producer.start()
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				observer.sendCompleted()
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 
 			it("should dispose of added disposables upon error") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 				var observer: Signal<(), TestError>.Observer!
 
-				let producer = SignalProducer<(), TestError>() { incomingObserver, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<(), TestError>() { incomingObserver, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					observer = incomingObserver
 				}
 
 				producer.start()
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				observer.sendFailed(.Default)
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 
 			it("should dispose of added disposables upon interruption") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 				var observer: Signal<(), NoError>.Observer!
 
-				let producer = SignalProducer<(), NoError>() { incomingObserver, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<(), NoError>() { incomingObserver, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					observer = incomingObserver
 				}
 
 				producer.start()
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				observer.sendInterrupted()
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 
 			it("should dispose of added disposables upon start() disposal") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 
-				let producer = SignalProducer<(), TestError>() { _, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<(), TestError>() { _, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					return
 				}
 
 				let startDisposable = producer.start()
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				startDisposable.dispose()
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 		}
 
@@ -505,59 +510,59 @@ class SignalProducerSpec: QuickSpec {
 			}
 
 			it("should dispose of added disposables if disposed") {
-				let addedDisposable = SimpleDisposable()
-				var disposable: Disposable!
+				var isDisposed = false
+				var interrupter: Disposable!
 
-				let producer = SignalProducer<Int, NoError>() { _, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<Int, NoError>() { _, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					return
 				}
 
-				producer.startWithSignal { _, innerDisposable in
-					disposable = innerDisposable
+				producer.startWithSignal { _, innerinterrupter in
+					interrupter = innerinterrupter
 				}
 
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
-				disposable.dispose()
-				expect(addedDisposable.disposed) == true
+				interrupter.dispose()
+				expect(isDisposed) == true
 			}
 
 			it("should send interrupted if disposed") {
 				var interrupted = false
-				var disposable: Disposable!
+				var interrupter: Disposable!
 
 				SignalProducer<Int, NoError>(value: 42)
 					.startOn(TestScheduler())
-					.startWithSignal { signal, innerDisposable in
+					.startWithSignal { signal, innerinterrupter in
 						signal.observeInterrupted {
 							interrupted = true
 						}
 
-						disposable = innerDisposable
+						interrupter = innerinterrupter
 					}
 
 				expect(interrupted) == false
 
-				disposable.dispose()
+				interrupter.dispose()
 				expect(interrupted) == true
 			}
 
 			it("should release signal observers if disposed") {
 				weak var objectRetainedByObserver: NSObject?
-				var disposable: Disposable!
+				var interrupter: Disposable!
 
 				let producer = SignalProducer<Int, NoError>.never
 				producer.startWithSignal { signal, innerDisposable in
 					let object = NSObject()
 					objectRetainedByObserver = object
-					signal.observeNext { _ in object.description }
-					disposable = innerDisposable
+					signal.observeNext { _ in _ = object.description }
+					interrupter = innerDisposable
 				}
 
 				expect(objectRetainedByObserver).toNot(beNil())
 
-				disposable.dispose()
+				interrupter.dispose()
 				expect(objectRetainedByObserver).to(beNil())
 			}
 
@@ -571,11 +576,11 @@ class SignalProducerSpec: QuickSpec {
 					}, next: {
 						value = $0
 					})
-					.startWithSignal { _, disposable in
+					.startWithSignal { _, interrupter in
 						expect(started) == false
 						expect(value).to(beNil())
 
-						disposable.dispose()
+						interrupter.dispose()
 					}
 
 				expect(started) == false
@@ -586,49 +591,49 @@ class SignalProducerSpec: QuickSpec {
 				var interrupted = false
 
 				SignalProducer<Int, NoError>(value: 42)
-					.startWithSignal { signal, disposable in
+					.startWithSignal { signal, interrupter in
 						expect(interrupted) == false
 
 						signal.observeInterrupted {
 							interrupted = true
 						}
 
-						disposable.dispose()
+						interrupter.dispose()
 					}
 
 				expect(interrupted) == true
 			}
 
 			it("should dispose of added disposables upon completion") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 				var observer: Signal<Int, TestError>.Observer!
 
-				let producer = SignalProducer<Int, TestError>() { incomingObserver, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<Int, TestError> { incomingObserver, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					observer = incomingObserver
 				}
 
 				producer.startWithSignal { _ in }
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				observer.sendCompleted()
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 
 			it("should dispose of added disposables upon error") {
-				let addedDisposable = SimpleDisposable()
+				var isDisposed = false
 				var observer: Signal<Int, TestError>.Observer!
 
-				let producer = SignalProducer<Int, TestError>() { incomingObserver, disposable in
-					disposable.addDisposable(addedDisposable)
+				let producer = SignalProducer<Int, TestError> { incomingObserver, disposalTrigger in
+					disposalTrigger.observeCompleted { isDisposed = true }
 					observer = incomingObserver
 				}
 
 				producer.startWithSignal { _ in }
-				expect(addedDisposable.disposed) == false
+				expect(isDisposed) == false
 
 				observer.sendFailed(.Default)
-				expect(addedDisposable.disposed) == true
+				expect(isDisposed) == true
 			}
 		}
 
@@ -657,30 +662,30 @@ class SignalProducerSpec: QuickSpec {
 				let producer = SignalProducer<(), NoError>.never
 
 				var interrupted = false
-				let disposable = producer.startWithInterrupted {
+				let interrupter = producer.startWithInterrupted {
 					interrupted = true
 				}
 
 				expect(interrupted) == false
 
-				disposable.dispose()
+				interrupter.dispose()
 				expect(interrupted) == true
 			}
 
 			it("should release observer when disposed") {
 				weak var objectRetainedByObserver: NSObject?
-				var disposable: Disposable!
+				var interrupter: Disposable!
 				let test = {
 					let producer = SignalProducer<Int, NoError>.never
 					let object = NSObject()
 					objectRetainedByObserver = object
-					disposable = producer.startWithNext { _ in object }
+					interrupter = producer.startWithNext { _ in _ = object }
 				}
 
 				test()
 				expect(objectRetainedByObserver).toNot(beNil())
 
-				disposable.dispose()
+				interrupter.dispose()
 				expect(objectRetainedByObserver).to(beNil())
 			}
 
@@ -895,10 +900,10 @@ class SignalProducerSpec: QuickSpec {
 				let producer = timer(1, onScheduler: scheduler, withLeeway: 0)
 
 				weak var weakSignal: Signal<NSDate, NoError>?
-				producer.startWithSignal { signal, disposable in
+				producer.startWithSignal { signal, interrupter in
 					weakSignal = signal
 					scheduler.schedule {
-						disposable.dispose()
+						interrupter.dispose()
 					}
 				}
 
@@ -1038,8 +1043,8 @@ class SignalProducerSpec: QuickSpec {
 				var (disposed, interrupted) = (false, false)
 				let disposable = baseProducer
 					.flatMapError { (error: TestError) -> SignalProducer<Int, TestError> in
-						return SignalProducer<Int, TestError> { _, disposable in
-							disposable += ActionDisposable { disposed = true }
+						return SignalProducer<Int, TestError> { _, disposalTrigger in
+							disposalTrigger.observeCompleted { disposed = true }
 						}
 					}
 					.startWithInterrupted { interrupted = true }
@@ -1442,16 +1447,18 @@ class SignalProducerSpec: QuickSpec {
 				var disposeOuter: (() -> Void)!
 				var execute: (FlattenStrategy -> Void)!
 
-				var innerDisposable = SimpleDisposable()
+				var isInnerDisposed = false
 				var interrupted = false
 
 				beforeEach {
 					execute = { strategy in
 						let (outerProducer, outerObserver) = SignalProducer<SignalProducer<Int, NoError>, NoError>.pipe()
 
-						innerDisposable = SimpleDisposable()
-						let innerProducer = SignalProducer<Int, NoError> { $1.addDisposable(innerDisposable) }
-						
+						isInnerDisposed = false
+						let innerProducer = SignalProducer<Int, NoError> { _, disposalTrigger in
+							disposalTrigger.observeCompleted { isInnerDisposed = true }
+						}
+
 						interrupted = false
 						let outerDisposable = outerProducer.flatten(strategy).startWithInterrupted {
 							interrupted = true
@@ -1468,11 +1475,11 @@ class SignalProducerSpec: QuickSpec {
 					it("should cancel inner work when disposed before the outer producer completes") {
 						execute(.Concat)
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 
@@ -1481,11 +1488,11 @@ class SignalProducerSpec: QuickSpec {
 
 						completeOuter()
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 				}
@@ -1494,11 +1501,11 @@ class SignalProducerSpec: QuickSpec {
 					it("should cancel inner work when disposed before the outer producer completes") {
 						execute(.Latest)
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 
@@ -1507,11 +1514,11 @@ class SignalProducerSpec: QuickSpec {
 
 						completeOuter()
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 				}
@@ -1520,11 +1527,11 @@ class SignalProducerSpec: QuickSpec {
 					it("should cancel inner work when disposed before the outer producer completes") {
 						execute(.Merge)
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 
@@ -1533,11 +1540,11 @@ class SignalProducerSpec: QuickSpec {
 
 						completeOuter()
 
-						expect(innerDisposable.disposed) == false
+						expect(isInnerDisposed) == false
 						expect(interrupted) == false
 						disposeOuter()
 
-						expect(innerDisposable.disposed) == true
+						expect(isInnerDisposed) == true
 						expect(interrupted) == true
 					}
 				}
@@ -1868,22 +1875,22 @@ class SignalProducerSpec: QuickSpec {
 
 		describe("observeOn") {
 			it("should immediately cancel upstream producer's work when disposed") {
-				var upstreamDisposable: Disposable!
-				let producer = SignalProducer<(), NoError>{ _, innerDisposable in
-					upstreamDisposable = innerDisposable
+				var upstreamDisposalTrigger: Signal<(), NoError>!
+				let producer = SignalProducer<(), NoError> { _, disposalTrigger in
+					upstreamDisposalTrigger = disposalTrigger
 				}
 
-				var downstreamDisposable: Disposable!
+				var downstreamInterrupter: Disposable!
 				producer
 					.observeOn(TestScheduler())
-					.startWithSignal { signal, innerDisposable in
-						downstreamDisposable = innerDisposable
+					.startWithSignal { signal, innerInterrupter in
+						downstreamInterrupter = innerInterrupter
 					}
 				
-				expect(upstreamDisposable.disposed) == false
+				expect(upstreamDisposalTrigger.hasTerminated) == false
 				
-				downstreamDisposable.dispose()
-				expect(upstreamDisposable.disposed) == true
+				downstreamInterrupter.dispose()
+				expect(upstreamDisposalTrigger.hasTerminated) == true
 			}
 		}
 

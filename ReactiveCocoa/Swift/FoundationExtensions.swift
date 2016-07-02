@@ -18,7 +18,7 @@ extension NSNotificationCenter {
 	public func rac_notifications(name: String? = nil, object: AnyObject? = nil) -> SignalProducer<NSNotification, NoError> {
 		// We're weakly capturing an optional reference here, which makes destructuring awkward.
 		let objectWasNil = (object == nil)
-		return SignalProducer { [weak object] observer, disposable in
+		return SignalProducer { [weak object] observer, disposalTrigger in
 			guard object != nil || objectWasNil else {
 				observer.sendInterrupted()
 				return
@@ -28,7 +28,7 @@ extension NSNotificationCenter {
 				observer.sendNext(notification)
 			}
 
-			disposable += {
+			disposalTrigger.observeCompleted {
 				self.removeObserver(notificationObserver)
 			}
 		}
@@ -41,7 +41,7 @@ extension NSURLSession {
 	/// Returns a producer that will execute the given request once for each
 	/// invocation of start().
 	public func rac_dataWithRequest(request: NSURLRequest) -> SignalProducer<(NSData, NSURLResponse), NSError> {
-		return SignalProducer { observer, disposable in
+		return SignalProducer { observer, disposalTrigger in
 			let task = self.dataTaskWithRequest(request) { data, response, error in
 				if let data = data, response = response {
 					observer.sendNext((data, response))
@@ -51,7 +51,7 @@ extension NSURLSession {
 				}
 			}
 
-			disposable += {
+			disposalTrigger.observeCompleted {
 				task.cancel()
 			}
 			task.resume()

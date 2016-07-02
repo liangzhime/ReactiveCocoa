@@ -11,6 +11,8 @@ public protocol ObserverType {
 	associatedtype Value
 	associatedtype Error: ErrorType
 
+	var action: (Event<Value, Error>) -> Void { get }
+
 	/// Puts a `Next` event into the given observer.
 	func sendNext(value: Value)
 

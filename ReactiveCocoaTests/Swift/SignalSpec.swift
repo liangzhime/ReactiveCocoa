@@ -24,7 +24,6 @@ class SignalSpec: QuickSpec {
 				var didRunGenerator = false
 				_ = Signal<AnyObject, NoError> { observer in
 					didRunGenerator = true
-					return nil
 				}
 				
 				expect(didRunGenerator) == true
@@ -40,7 +39,6 @@ class SignalSpec: QuickSpec {
 						}
 						observer.sendCompleted()
 					}
-					return nil
 				}
 				
 				var fromSignal: [Int] = []
@@ -66,6 +64,7 @@ class SignalSpec: QuickSpec {
 				expect(fromSignal) == numbers
 			}
 
+			/**
 			it("should dispose of returned disposable upon error") {
 				let disposable = SimpleDisposable()
 				
@@ -135,6 +134,7 @@ class SignalSpec: QuickSpec {
 				expect(interrupted) == true
 				expect(disposable.disposed) == true
 			}
+			**/
 		}
 
 		describe("Signal.empty") {
@@ -196,9 +196,7 @@ class SignalSpec: QuickSpec {
 
 					for _ in 0..<50 {
 						autoreleasepool {
-							let disposable = signal.observe { _ in }
-
-							disposable!.dispose()
+							signal.observe { _ in }
 						}
 					}
 				}
@@ -213,8 +211,6 @@ class SignalSpec: QuickSpec {
 			}
 			
 			it("should stop forwarding events when disposed") {
-				let disposable = SimpleDisposable()
-				
 				let signal: Signal<Int, NoError> = Signal { observer in
 					testScheduler.schedule {
 						for number in [ 1, 2 ] {
@@ -223,28 +219,31 @@ class SignalSpec: QuickSpec {
 						observer.sendCompleted()
 						observer.sendNext(4)
 					}
-					return disposable
 				}
 				
 				var fromSignal: [Int] = []
 				signal.observeNext { number in
 					fromSignal.append(number)
 				}
-				
-				expect(disposable.disposed) == false
+
+				var isDisposed = false
+				signal.observeTerminated {
+					isDisposed = true
+				}
+
 				expect(fromSignal).to(beEmpty())
+				expect(isDisposed) == false
 				
 				testScheduler.run()
 				
-				expect(disposable.disposed) == true
 				expect(fromSignal) == [ 1, 2 ]
+				expect(isDisposed) == true
 			}
 
 			it("should not trigger side effects") {
 				var runCount = 0
 				let signal: Signal<(), NoError> = Signal { observer in
 					runCount += 1
-					return nil
 				}
 				
 				expect(runCount) == 1
@@ -762,7 +761,6 @@ class SignalSpec: QuickSpec {
 							observer.sendNext(number)
 						}
 					}
-					return nil
 				}
 				
 				var completed = false
@@ -785,7 +783,6 @@ class SignalSpec: QuickSpec {
 							observer.sendNext(number)
 						}
 					}
-					return nil
 				}
 
 				var result: [Int] = []
@@ -948,6 +945,7 @@ class SignalSpec: QuickSpec {
 
 			var lastValue: Int? = nil
 			var completed: Bool = false
+			var hasUnexpectedEvents: Bool = false
 
 			beforeEach {
 				let (baseSignal, incomingObserver) = Signal<Int, NoError>.pipe()
@@ -966,8 +964,8 @@ class SignalSpec: QuickSpec {
 						lastValue = value
 					case .Completed:
 						completed = true
-					default:
-						break
+					case .Failed, .Interrupted:
+						hasUnexpectedEvents = true
 					}
 				}
 			}
@@ -984,6 +982,7 @@ class SignalSpec: QuickSpec {
 				expect(completed) == false
 				triggerObserver.sendNext(())
 				expect(completed) == true
+				expect(hasUnexpectedEvents) == false
 			}
 			
 			it("should take values until the trigger completes") {
@@ -998,6 +997,7 @@ class SignalSpec: QuickSpec {
 				expect(completed) == false
 				triggerObserver.sendCompleted()
 				expect(completed) == true
+				expect(hasUnexpectedEvents) == false
 			}
 
 			it("should complete if the trigger fires immediately") {
@@ -1008,6 +1008,7 @@ class SignalSpec: QuickSpec {
 
 				expect(completed) == true
 				expect(lastValue).to(beNil())
+				expect(hasUnexpectedEvents) == false
 			}
 		}
 
@@ -1159,7 +1160,6 @@ class SignalSpec: QuickSpec {
 						observer.sendNext(2)
 						observer.sendCompleted()
 					})
-					return nil
 				}
 				
 				var result: [Int] = []
@@ -1196,7 +1196,6 @@ class SignalSpec: QuickSpec {
 					testScheduler.schedule {
 						observer.sendFailed(TestError.Default)
 					}
-					return nil
 				}
 				
 				var errored = false

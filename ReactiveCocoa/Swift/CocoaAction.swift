@@ -1,4 +1,5 @@
 import Foundation
+import enum Result.NoError
 
 /// Wraps an Action for use by a GUI control (such as `NSControl` or
 /// `UIControl`), with KVO, or with Cocoa Bindings.
@@ -18,10 +19,9 @@ public final class CocoaAction: NSObject {
 	/// This property will only change on the main thread, and will generate a
 	/// KVO notification for every change.
 	public private(set) var executing: Bool = false
-	
-	private let _execute: AnyObject? -> Void
-	private let disposable = CompositeDisposable()
-	
+
+	private let _execute: (AnyObject?) -> Void
+
 	/// Initializes a Cocoa action that will invoke the given Action by
 	/// transforming the object given to execute().
 	public init<Input, Output, Error>(_ action: Action<Input, Output, Error>, _ inputTransform: AnyObject? -> Input) {
@@ -31,16 +31,23 @@ public final class CocoaAction: NSObject {
 		}
 		
 		super.init()
+
+		let willDeinitProducer = rac_willDeallocSignal()
+			.toSignalProducer()
+			.map { _ in }
+			.flatMapError { _ in SignalProducer<(), NoError>.empty }
 		
-		disposable += action.enabled.producer
+		action.enabled.producer
+			.takeUntil(willDeinitProducer)
 			.observeOn(UIScheduler())
 			.startWithNext { [weak self] value in
 				self?.willChangeValueForKey("enabled")
 				self?.enabled = value
 				self?.didChangeValueForKey("enabled")
 		}
-		
-		disposable += action.executing.producer
+
+		action.executing.producer
+			.takeUntil(willDeinitProducer)
 			.observeOn(UIScheduler())
 			.startWithNext { [weak self] value in
 				self?.willChangeValueForKey("executing")
@@ -54,11 +61,7 @@ public final class CocoaAction: NSObject {
 	public convenience init<Input, Output, Error>(_ action: Action<Input, Output, Error>, input: Input) {
 		self.init(action, { _ in input })
 	}
-	
-	deinit {
-		disposable.dispose()
-	}
-	
+
 	/// Attempts to execute the underlying action with the given input, subject
 	/// to the behavior described by the initializer that was used.
 	@IBAction public func execute(input: AnyObject?) {
