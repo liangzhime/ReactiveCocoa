@@ -1303,7 +1303,6 @@ class PropertySpec: QuickSpec {
 					expect(mutableProperty.value) == subsequentPropertyValue
 				}
 
-				/**
 				it("should tear down the binding when disposed") {
 					let (signal, observer) = Signal<String, NoError>.pipe()
 
@@ -1337,7 +1336,7 @@ class PropertySpec: QuickSpec {
 
 					mutableProperty = nil
 					expect(bindingDisposable.disposed) == true
-				}**/
+				}
 			}
 
 			describe("from a SignalProducer") {
@@ -1353,14 +1352,23 @@ class PropertySpec: QuickSpec {
 				}
 
 				it("should tear down the binding when disposed") {
-					let signalValues = [initialPropertyValue, subsequentPropertyValue]
-					let signalProducer = SignalProducer<String, NoError>(values: signalValues)
+					var isDisposed = false
+
+					let (signalProducer, signalObserver) = SignalProducer<String, NoError>.pipe()
 
 					let mutableProperty = MutableProperty(initialPropertyValue)
-					let interrupter = mutableProperty <~ signalProducer
+					let interrupter = mutableProperty <~ signalProducer.on(disposed: { isDisposed = true })
+
+					expect(isDisposed) == false
+
+					signalObserver.sendNext(subsequentPropertyValue)
+					expect(isDisposed) == false
+					expect(mutableProperty.value) == subsequentPropertyValue
 
 					interrupter.dispose()
-					// TODO: Assert binding was torn down?
+					expect(isDisposed) == true
+
+					signalObserver.sendCompleted()
 				}
 
 				it("should tear down the binding when bound signal is completed") {

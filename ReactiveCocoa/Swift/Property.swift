@@ -572,25 +572,46 @@ infix operator <~ {
 ///
 /// The binding will automatically terminate when the property is deinitialized,
 /// or when the signal sends a `Completed` event.
-public func <~ <P: MutablePropertyType>(property: P, signal: Signal<P.Value, NoError>) {
+private func bind<P: MutablePropertyType, S: SignalType where P.Value == S.Value, S.Error == NoError>(to property: P, from signal: S, interrupter: Disposable? = nil) -> Disposable {
+	/// A signal which complete at the point the resources of the binding should
+	/// be teared down.
 	let termination = Signal<(), NoError>.pipe()
+
+	/// A `Disposable` that disposes of the binding.
+	let disposable = ActionDisposable(action: termination.observer.sendCompleted)
 
 	let observer = Observer<P.Value, NoError> { [weak property] event in
 		switch event {
 		case let .Next(value):
 			property?.value = value
 		case .Completed:
-			termination.observer.sendCompleted()
+			disposable.dispose()
 		case .Failed, .Interrupted:
 			break
 		}
 	}
 
-	property.signal.observeCompleted {
-		termination.observer.sendCompleted()
-	}
-
+	/// Observes the signal until it terminates, or the binding is disposed of.
 	signal.observe(until: termination.signal, observer: observer)
+
+	/// Interrupts the producer when the binding is disposed of, if an interrupter
+	/// is provided.
+	_ = interrupter.map { termination.signal.observeCompleted($0.dispose) }
+
+	/// Observes the property for its deinitialization, and disposes of the binding
+	/// accordingly.
+	property.signal.observeCompleted(disposable.dispose)
+
+	return disposable
+}
+
+/// Binds a signal to a property, updating the property's value to the latest
+/// value sent by the signal.
+///
+/// The binding will automatically terminate when the property is deinitialized,
+/// or when the signal sends a `Completed` event.
+public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value, S.Error == NoError>(property: P, signal: S) -> Disposable {
+	return bind(to: property, from: signal)
 }
 
 /// Creates a signal from the given producer, which will be immediately bound to
@@ -601,18 +622,12 @@ public func <~ <P: MutablePropertyType>(property: P, signal: Signal<P.Value, NoE
 /// or when the created signal sends a `Completed` event.
 public func <~ <P: MutablePropertyType>(property: P, producer: SignalProducer<P.Value, NoError>) -> Disposable {
 	return producer.startWithSignal { signal, interrupter in
-		property <~ signal
-
-		property.producer.startWithCompleted {
-			interrupter.dispose()
-		}
-
-		return interrupter
+		return bind(to: property, from: signal, interrupter: interrupter)
 	}
 }
 
-public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value?, S.Error == NoError>(property: P, signal: S) {
-	property <~ signal.optionalize()
+public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value?, S.Error == NoError>(property: P, signal: S) -> Disposable {
+	return property <~ signal.optionalize()
 }
 
 public func <~ <P: MutablePropertyType, S: SignalProducerType where P.Value == S.Value?, S.Error == NoError>(property: P, producer: S) -> Disposable {
