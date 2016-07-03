@@ -78,7 +78,7 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// Creates a producer for a Signal that will immediately send the values
 	/// from the given sequence, then complete.
 	public init<S: SequenceType where S.Generator.Element == Value>(values: S) {
-		self.init { observer, _ in
+		self.init { observer, disposalTrigger in
 			values.forEach(observer.sendNext)
 			observer.sendCompleted()
 		}

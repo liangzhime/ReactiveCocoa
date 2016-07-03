@@ -384,7 +384,8 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// emitted from `producer` complete.
 	private func concat() -> SignalProducer<Value.Value, Error> {
 		return SignalProducer<Value.Value, Error> { observer, disposalTrigger in
-			self.startWithSignalUntil(disposalTrigger) { signal in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
 				signal.observeConcat(observer, producerDisposing: disposalTrigger)
 			}
 		}
@@ -578,7 +579,8 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// added earlier. Returns a Signal that will forward events from the inner producers as they arrive.
 	private func merge() -> SignalProducer<Value.Value, Error> {
 		return SignalProducer<Value.Value, Error> { relayObserver, disposalTrigger in
-			self.startWithSignalUntil(disposalTrigger) { signal in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
 				signal.observeMerge(relayObserver, producerDisposing: disposalTrigger)
 			}
 		}
@@ -732,7 +734,8 @@ extension SignalProducerType where Value: SignalProducerType, Error == Value.Err
 	/// signal have both completed.
 	private func switchToLatest() -> SignalProducer<Value.Value, Error> {
 		return SignalProducer<Value.Value, Error> { observer, disposalTrigger in
-			self.startWithSignalUntil(disposalTrigger) { signal in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
 				signal.observeSwitchToLatest(observer, producerDisposing: disposalTrigger)
 			}
 		}
@@ -955,7 +958,8 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func flatMapError<F>(handler: Error -> SignalProducer<Value, F>) -> SignalProducer<Value, F> {
 		return SignalProducer { observer, disposalTrigger in
-			self.startWithSignalUntil(disposalTrigger) { signal in
+			self.startWithSignal { signal, interrupter in
+				disposalTrigger.observeTerminated(interrupter)
 				signal.observeFlatMapError(handler, observer, producerDisposing: disposalTrigger)
 			}
 		}
