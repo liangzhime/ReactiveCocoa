@@ -189,6 +189,68 @@ class SignalProducerSpec: QuickSpec {
 				observer.sendFailed(sentError)
 				expect(error) == sentError
 			}
+
+			it("should propagate the interruption") {
+				let source = Signal<Int, NoError>.pipe()
+				let producer = SignalProducer(signal: source.signal)
+
+				var interruptionCounter = 0
+				var isInterrupted = false
+
+				func incrementInterruptionCounter() {
+					interruptionCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+
+				let interrupter = outmostProducer.startWithInterrupted {
+					isInterrupted = true
+				}
+
+				expect(isInterrupted) == false
+
+				interrupter.dispose()
+
+				expect(interruptionCounter) == 6
+				expect(isInterrupted) == true
+			}
+
+			it("should propagate the disposal") {
+				let source = Signal<Int, NoError>.pipe()
+				let producer = SignalProducer(signal: source.signal)
+
+				var disposalCounter = 0
+				var isInterrupted = false
+
+				func incrementDisposalCounter() {
+					disposalCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+
+				let interrupter = outmostProducer.startWithInterrupted {
+					isInterrupted = true
+				}
+
+				expect(isInterrupted) == false
+
+				interrupter.dispose()
+
+				expect(disposalCounter) == 6
+				expect(isInterrupted) == true
+			}
 		}
 
 		describe("init(value:)") {
@@ -197,6 +259,84 @@ class SignalProducerSpec: QuickSpec {
 				let signalProducer = SignalProducer<String, NSError>(value: producerValue)
 
 				expect(signalProducer).to(sendValue(producerValue, sendError: nil, complete: true))
+			}
+
+			it("should propagate the interruption") {
+				let producer = SignalProducer<Int, NoError>(value: 1)
+
+				var interruptionCounter = 0
+				var isInterrupted = false
+				var hasUnexpectedEvents = false
+
+				func incrementInterruptionCounter() {
+					interruptionCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+
+				outmostProducer.take(1).startWithSignal { signal, interrupter in
+					signal.observe { event in
+						switch event {
+						case .Next:
+							interrupter.dispose()
+
+						case .Interrupted:
+							isInterrupted = true
+
+						case .Completed, .Failed:
+							hasUnexpectedEvents = true
+						}
+					}
+				}
+
+				expect(interruptionCounter) == 6
+				expect(isInterrupted) == true
+				expect(hasUnexpectedEvents) == false
+			}
+
+			it("should propagate the disposal") {
+				let producer = SignalProducer<Int, NoError>(value: 1)
+
+				var disposalCounter = 0
+				var isInterrupted = false
+				var hasUnexpectedEvents = false
+
+				func incrementDisposalCounter() {
+					disposalCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+
+				outmostProducer.take(1).startWithSignal { signal, interrupter in
+					signal.observe { event in
+						switch event {
+						case .Next:
+							interrupter.dispose()
+
+						case .Interrupted:
+							isInterrupted = true
+
+						case .Completed, .Failed:
+							hasUnexpectedEvents = true
+						}
+					}
+				}
+
+				expect(disposalCounter) == 6
+				expect(isInterrupted) == true
+				expect(hasUnexpectedEvents) == false
 			}
 		}
 
@@ -233,6 +373,94 @@ class SignalProducerSpec: QuickSpec {
 				let signalProducer = SignalProducer<Int, NSError>(values: sequenceValues)
 
 				expect(signalProducer).to(sendValues(sequenceValues, sendError: nil, complete: true))
+			}
+
+			it("should propagate the interruption") {
+				let producer = SignalProducer<Int, NoError>(values: [1, 2, 3])
+
+				var interruptionCounter = 0
+				var isInterrupted = false
+				var hasUnexpectedEvents = false
+				var value = 0
+
+				func incrementInterruptionCounter() {
+					interruptionCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+					.on(interrupted: incrementInterruptionCounter)
+
+				outmostProducer.startWithSignal { signal, interrupter in
+					signal.observe { event in
+						switch event {
+						case let .Next(nextValue):
+							value = nextValue
+							if value == 2 {
+								interrupter.dispose()
+							}
+
+						case .Interrupted:
+							isInterrupted = true
+
+						case .Completed, .Failed:
+							hasUnexpectedEvents = true
+						}
+					}
+				}
+
+				expect(interruptionCounter) == 6
+				expect(isInterrupted) == true
+				expect(hasUnexpectedEvents) == false
+				expect(value) == 2
+			}
+
+			it("should propagate the disposal") {
+				let producer = SignalProducer<Int, NoError>(values: [1, 2, 3])
+
+				var disposalCounter = 0
+				var isInterrupted = false
+				var hasUnexpectedEvents = false
+				var value = 0
+
+				func incrementDisposalCounter() {
+					disposalCounter += 1
+				}
+
+				let outmostProducer = producer
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+					.on(disposed: incrementDisposalCounter)
+
+				outmostProducer.startWithSignal { signal, interrupter in
+					signal.observe { event in
+						switch event {
+						case let .Next(nextValue):
+							value = nextValue
+							if value == 2 {
+								interrupter.dispose()
+							}
+
+						case .Interrupted:
+							isInterrupted = true
+
+						case .Completed, .Failed:
+							hasUnexpectedEvents = true
+						}
+					}
+				}
+
+				expect(disposalCounter) == 6
+				expect(isInterrupted) == true
+				expect(hasUnexpectedEvents) == false
+				expect(value) == 2
 			}
 		}
 
