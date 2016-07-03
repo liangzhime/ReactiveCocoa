@@ -424,7 +424,7 @@ private final class ConcatState<Value, Error: ErrorType> {
 	/// The active producer, if any, and the producers waiting to be started.
 	let queuedSignalProducers: Atomic<[SignalProducer<Value, Error>]> = Atomic([])
 
-	var currentProducerDisposable: Disposable?
+	let currentProducerDisposable = SerialDisposable()
 
 	init(observer: Signal<Value, Error>.Observer) {
 		self.observer = observer
@@ -462,13 +462,11 @@ private final class ConcatState<Value, Error: ErrorType> {
 	/// Subscribes to the given signal producer.
 	func startNextSignalProducer(signalProducer: SignalProducer<Value, Error>) {
 		signalProducer.startWithSignal { signal, interrupter in
-			currentProducerDisposable = interrupter
+			currentProducerDisposable.innerDisposable = interrupter
 
 			signal.observe { event in
 				switch event {
 				case .Completed, .Interrupted:
-					self.currentProducerDisposable = nil
-
 					if let nextSignalProducer = self.dequeueSignalProducer() {
 						self.startNextSignalProducer(nextSignalProducer)
 					}
@@ -491,13 +489,13 @@ private final class ConcatState<Value, Error: ErrorType> {
 			observer.sendInterrupted()
 		}
 
-		currentProducerDisposable?.dispose()
+		currentProducerDisposable.dispose()
 	}
 
 	func enqueueCompletionProducer() {
 		enqueueSignalProducer(SignalProducer.empty.on(completed: {
 			self.observer.sendCompleted()
-			self.currentProducerDisposable?.dispose()
+			self.currentProducerDisposable.dispose()
 		}))
 	}
 }
