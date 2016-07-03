@@ -641,35 +641,29 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 
 	private func observeSwitchToLatest(observer: Observer<Value.Value, Error>, producerDisposing trigger: Signal<(), NoError>? = nil) {
 		let state = Atomic(LatestState<Value, Error>())
+		let serialDisposable = SerialDisposable()
 
-		func cleanup() {
-			var interrupter: Disposable?
+		trigger?.observeCompleted(serialDisposable.dispose)
 
-			state.modify { latestState in
-				swap(&interrupter, &latestState.interrupter)
+		let wrappedObserver = Observer<Value.Value, Error> { event in
+			observer.action(event)
+
+			if event.isTerminating {
+				serialDisposable.dispose()
 			}
-
-			interrupter?.dispose()
 		}
-
-		trigger?.observeCompleted(cleanup)
 
 		return self.observe { event in
 			switch event {
 			case let .Next(innerProducer):
 				innerProducer.startWithSignal { innerSignal, interrupter in
-					var oldDisposable: Disposable?
-
 					state.modify { state in
 						// When we replace the disposable below, this prevents the
 						// generated Interrupted event from doing any work.
 						state.replacingInnerSignal = true
-
-						oldDisposable = interrupter
-						swap(&state.interrupter, &oldDisposable)
 					}
 
-					oldDisposable?.dispose()
+					serialDisposable.innerDisposable = interrupter
 
 					state.modify { state in
 						state.replacingInnerSignal = false
@@ -688,8 +682,7 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 							}
 
 							if !original.replacingInnerSignal && original.outerSignalComplete {
-								observer.sendCompleted()
-								cleanup()
+								wrappedObserver.sendCompleted()
 							}
 
 						case .Completed:
@@ -698,22 +691,19 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 							}
 
 							if original.outerSignalComplete {
-								observer.sendCompleted()
-								cleanup()
+								wrappedObserver.sendCompleted()
 							}
 
 						case .Next:
 							observer.action(event)
 
-						case .Failed:
-							observer.action(event)
-							cleanup()
+						case let .Failed(error):
+							wrappedObserver.sendFailed(error)
 						}
 					}
 				}
 			case let .Failed(error):
-				observer.sendFailed(error)
-				cleanup()
+				wrappedObserver.sendFailed(error)
 
 			case .Completed:
 				let original = state.modify { state in
@@ -721,13 +711,11 @@ extension SignalType where Value: SignalProducerType, Error == Value.Error {
 				}
 
 				if original.innerSignalComplete {
-					observer.sendCompleted()
-					cleanup()
+					wrappedObserver.sendCompleted()
 				}
 
 			case .Interrupted:
-				observer.sendInterrupted()
-				cleanup()
+				wrappedObserver.sendInterrupted()
 			}
 		}
 	}
@@ -756,7 +744,6 @@ private struct LatestState<Value, Error: ErrorType> {
 	var innerSignalComplete: Bool = true
 	
 	var replacingInnerSignal: Bool = false
-	var interrupter: Disposable?
 }
 
 
