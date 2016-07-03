@@ -621,9 +621,13 @@ public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value, 
 /// The binding will automatically terminate when the property is deinitialized,
 /// or when the created signal sends a `Completed` event.
 public func <~ <P: MutablePropertyType>(property: P, producer: SignalProducer<P.Value, NoError>) -> Disposable {
-	return producer.startWithSignal { signal, interrupter in
-		return bind(to: property, from: signal, interrupter: interrupter)
+	var bindingInterrupter: Disposable!
+
+	producer.startWithSignal { signal, interrupter in
+		bindingInterrupter = bind(to: property, from: signal, interrupter: interrupter)
 	}
+
+	return bindingInterrupter
 }
 
 public func <~ <P: MutablePropertyType, S: SignalType where P.Value == S.Value?, S.Error == NoError>(property: P, signal: S) -> Disposable {

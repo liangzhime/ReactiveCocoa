@@ -78,7 +78,7 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// Creates a producer for a Signal that will immediately send the values
 	/// from the given sequence, then complete.
 	public init<S: SequenceType where S.Generator.Element == Value>(values: S) {
-		self.init { observer, _ in
+		self.init { observer, disposalTrigger in
 			values.forEach(observer.sendNext)
 			observer.sendCompleted()
 		}
@@ -212,28 +212,48 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// The closure will also receive an observer which can be used to
 	/// interrupt the work associated with the signal and immediately send an
 	/// `Interrupted` event.
-	public func startWithSignal<Result>(@noescape setup: (signal: Signal<Value, Error>, interrupter: Disposable) -> Result) -> Result {
+	public func startWithSignal(@noescape setup: (signal: Signal<Value, Error>, interrupter: Disposable) -> Void) -> Disposable {
 		let (signal, observer) = Signal<Value, Error>.pipe()
-		let (disposalTrigger, disposalObserver) = Signal<(), NoError>.pipe()
 
 		let interrupter = MutableActionDisposable.make(observer.sendInterrupted)
-		let setupResult = setup(signal: signal, interrupter: interrupter.disposable)
+		setup(signal: signal, interrupter: interrupter.disposable)
 
 		if interrupter.disposable.disposed {
-			return setupResult
+			/// Work has been interrupted.
+			return interrupter.disposable
 		}
 
-		let wrapperObserver = Signal<Value, Error>.Observer { event in
+		let disposalTrigger = Signal<(), NoError>.pipe()
+		let wrappedObserver = Signal<Value, Error>.Observer { event in
 			observer.action(event)
 
 			if event.isTerminating {
-				disposalObserver.sendCompleted()
+				disposalTrigger.observer.sendCompleted()
 			}
 		}
 
-		interrupter.setter(wrapperObserver.sendInterrupted)
-		startHandler(observer: wrapperObserver, disposalTrigger: disposalTrigger)
-		return setupResult
+		interrupter.setter(wrappedObserver.sendInterrupted)
+		startHandler(observer: wrappedObserver, disposalTrigger: disposalTrigger.signal)
+
+		return interrupter.disposable
+	}
+
+	/// Creates a Signal from the producer, passes it into the given closure,
+	/// then starts sending events on the Signal when the closure has returned.
+	///
+	/// This overload is intended for composing `SignalProducer` operators, and
+	/// expects a disposal trigger from the downstream producer, usually obtained
+	/// by calling `SignalProducer.init`, so as to interrupt any work and dispose
+	/// of resources.
+	public func startWithSignalUntil(disposalTrigger: Signal<(), NoError>, @noescape setup: (signal: Signal<Value, Error>) -> Void) {
+		if disposalTrigger.hasTerminated {
+			/// The downstream producer has already been interrupted.
+			return
+		}
+
+		let (signal, sink) = Signal<Value, Error>.pipe()
+		setup(signal: signal)
+		startHandler(observer: sink, disposalTrigger: disposalTrigger)
 	}
 }
 
@@ -300,7 +320,11 @@ public protocol SignalProducerType {
 
 	/// Creates a Signal from the producer, passes it into the given closure,
 	/// then starts sending events on the Signal when the closure has returned.
-	func startWithSignal<Result>(@noescape setup: (signal: Signal<Value, Error>, interrupter: Disposable) -> Result) -> Result
+	func startWithSignal(@noescape setup: (signal: Signal<Value, Error>, interrupter: Disposable) -> Void) -> Disposable
+
+	/// Creates a Signal from the producer, passes it into the given closure,
+	/// then starts sending events on the Signal when the closure has returned.
+	func startWithSignalUntil(disposalTrigger: Signal<(), NoError>, @noescape setup: (signal: Signal<Value, Error>) -> Void)
 }
 
 extension SignalProducer: SignalProducerType {
@@ -316,9 +340,8 @@ extension SignalProducerType {
 	/// Returns an `Disposable` which can be used to interrupt the work associated
 	/// with the signal and immediately send an `Interrupted` event.
 	public func start(observer: Signal<Value, Error>.Observer = Signal<Value, Error>.Observer()) -> Disposable {
-		return startWithSignal { signal, interrupter in
+		return startWithSignal { signal, innerInterrupter in
 			signal.observe(observer)
-			return interrupter
 		}
 	}
 
@@ -376,8 +399,7 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func lift<U, F>(transform: (Signal<Value, Error>) -> Signal<U, F>) -> SignalProducer<U, F> {
 		return SignalProducer { observer, disposalTrigger in
-			self.startWithSignal { signal, interrupter in
-				disposalTrigger.observeTerminated(interrupter)
+			self.startWithSignalUntil(disposalTrigger) { signal in
 				transform(signal).observe(observer)
 			}
 		}
@@ -405,11 +427,8 @@ extension SignalProducerType {
 	private func liftRight<U, F, V, G>(transform: Signal<Value, Error> -> Signal<U, F> -> Signal<V, G>) -> SignalProducer<U, F> -> SignalProducer<V, G> {
 		return { otherProducer in
 			return SignalProducer { observer, disposalTrigger in
-				self.startWithSignal { signal, interrupter in
-					disposalTrigger.observeTerminated(interrupter)
-
-					otherProducer.startWithSignal { otherSignal, otherDisposable in
-						disposalTrigger.observeTerminated(otherDisposable)
+				self.startWithSignalUntil(disposalTrigger) { signal in
+					otherProducer.startWithSignalUntil(disposalTrigger) { otherSignal in
 						transform(signal)(otherSignal).observe(observer)
 					}
 				}
@@ -425,11 +444,8 @@ extension SignalProducerType {
 	private func liftLeft<U, F, V, G>(transform: Signal<Value, Error> -> Signal<U, F> -> Signal<V, G>) -> SignalProducer<U, F> -> SignalProducer<V, G> {
 		return { otherProducer in
 			return SignalProducer { observer, disposalTrigger in
-				otherProducer.startWithSignal { otherSignal, otherDisposable in
-					disposalTrigger.observeTerminated(otherDisposable)
-
-					self.startWithSignal { signal, interrupter in
-						disposalTrigger.observeTerminated(interrupter)
+				otherProducer.startWithSignalUntil(disposalTrigger) { otherSignal in
+					self.startWithSignalUntil(disposalTrigger) { signal in
 						transform(signal)(otherSignal).observe(observer)
 					}
 				}
@@ -455,8 +471,7 @@ extension SignalProducerType {
 				// for the details.
 				otherSignal.observe(until: disposalTrigger, observer: otherSignalObserver)
 
-				self.startWithSignal { signal, interrupter in
-					disposalTrigger.observeTerminated(interrupter)
+				self.startWithSignalUntil(disposalTrigger) { signal in
 					transform(signal)(wrapperSignal).observe(observer)
 				}
 			}
@@ -609,24 +624,7 @@ extension SignalProducerType {
 	/// will also be interrupted.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func combineLatestWith<U>(otherProducer: SignalProducer<U, Error>) -> SignalProducer<(Value, U), Error> {
-		// This should be the implementation of this method:
-		// return liftRight(Signal.combineLatestWith)(otherProducer)
-		//
-		// However, due to a Swift miscompilation (with `-O`) we need to inline `liftRight` here.
-		// See https://github.com/ReactiveCocoa/ReactiveCocoa/issues/2751 for more details.
-		//
-		// This can be reverted once tests with -O don't crash. 
-
-		return SignalProducer { observer, disposalTrigger in
-			self.startWithSignal { signal, interrupter in
-				disposalTrigger.observeTerminated(interrupter)
-
-				otherProducer.startWithSignal { otherSignal, otherInterrupter in
-					disposalTrigger.observeTerminated(otherInterrupter)
-					signal.combineLatestWith(otherSignal).observe(observer)
-				}
-			}
-		}
+		return liftRight(Signal.combineLatestWith)(otherProducer)
 	}
 
 	/// Combines the latest value of the receiver with the latest value from
@@ -729,25 +727,7 @@ extension SignalProducerType {
 	/// event, at which point the returned producer will complete.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func takeUntil(trigger: SignalProducer<(), NoError>) -> SignalProducer<Value, Error> {
-		// This should be the implementation of this method:
-		// return liftRight(Signal.takeUntil)(trigger)
-		//
-		// However, due to a Swift miscompilation (with `-O`) we need to inline `liftRight` here.
-		// See https://github.com/ReactiveCocoa/ReactiveCocoa/issues/2751 for more details.
-		//
-		// This can be reverted once tests with -O work correctly.
-
-		return SignalProducer { observer, disposalTrigger in
-			self.startWithSignal { signal, interrupter in
-				disposalTrigger.observeTerminated(interrupter)
-
-				trigger.startWithSignal { triggerSignal, triggerDisposable in
-					disposalTrigger.observeTerminated(triggerDisposable)
-
-					signal.takeUntil(triggerSignal).observe(observer)
-				}
-			}
-		}
+		return liftRight(Signal.takeUntil)(trigger)
 	}
 
 	/// Forwards events from `self` until `trigger` sends a Next or Completed
@@ -1013,10 +993,8 @@ extension SignalProducerType {
 	public func on(started started: (() -> Void)? = nil, event: (Event<Value, Error> -> Void)? = nil, failed: (Error -> Void)? = nil, completed: (() -> Void)? = nil, interrupted: (() -> Void)? = nil, terminated: (() -> Void)? = nil, disposed: (() -> Void)? = nil, next: (Value -> Void)? = nil) -> SignalProducer<Value, Error> {
 		return SignalProducer { observer, disposalTrigger in
 			started?()
-			self.startWithSignal { signal, interrupter in
-				disposalTrigger.observeTerminated(interrupter)
+			self.startWithSignalUntil(disposalTrigger) { signal in
 				_ = disposed.map(disposalTrigger.observeCompleted)
-
 				signal
 					.on(
 						event: event,
@@ -1258,9 +1236,7 @@ extension SignalProducerType {
 
 		return SignalProducer { observer, disposalTrigger in
 			func iterate(current: Int) {
-				self.startWithSignal { signal, interrupter in
-					disposalTrigger.observeTerminated(interrupter)
-
+				self.startWithSignalUntil(disposalTrigger) { signal in
 					signal.observe { event in
 						if case .Completed = event {
 							let remainingTimes = current - 1
@@ -1301,9 +1277,7 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func then<U>(replacement: SignalProducer<U, Error>) -> SignalProducer<U, Error> {
 		return SignalProducer<U, Error> { observer, disposalTrigger in
-			self.startWithSignal { signal, interrupter in
-				disposalTrigger.observeTerminated(interrupter)
-
+			self.startWithSignalUntil(disposalTrigger) { signal in
 				signal.observe { event in
 					switch event {
 					case let .Failed(error):
