@@ -43,13 +43,31 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// would be sent upon `disposalTrigger`, at which point work should be
 	/// interrupted and any temporary resources cleaned up.
 	public init(_ startHandler: (observer: Signal<Value, Error>.Observer, disposalTrigger: Signal<(), NoError>) -> Void) {
+		self.startHandler = { observer, disposalTrigger in
+			disposalTrigger.observeCompleted(observer.sendInterrupted)
+			startHandler(observer: observer, disposalTrigger: disposalTrigger)
+		}
+	}
+
+	/// Composes a SignalProducer that will invoke the given closure once
+	/// for each invocation of start().
+	///
+	/// This initializer is similar to the `SignalProducer.init`, but requires
+	/// the producer to manually response to the interruption notified upon
+	/// `disposalTrigger` by **at least sending a `.Interrupted` event** to
+	/// `observer`.
+	public static func compose(startHandler: (observer: Signal<Value, Error>.Observer, disposalTrigger: Signal<(), NoError>) -> Void) -> SignalProducer<Value, Error> {
+		return self.init((), startHandler: startHandler)
+	}
+
+	private init(_ nilLiteral: (), startHandler: (observer: Signal<Value, Error>.Observer, disposalTrigger: Signal<(), NoError>) -> Void) {
 		self.startHandler = startHandler
 	}
 
 	/// Creates a producer for a Signal that will immediately send one value
 	/// then complete.
 	public init(value: Value) {
-		self.init { observer, _ in
+		self.init { observer, disposalTrigger in
 			observer.sendNext(value)
 			observer.sendCompleted()
 		}
@@ -58,7 +76,7 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// Creates a producer for a Signal that will immediately fail with the
 	/// given error.
 	public init(error: Error) {
-		self.init { observer, _ in
+		self.init { observer, disposalTrigger in
 			observer.sendFailed(error)
 		}
 	}
@@ -196,7 +214,8 @@ public struct SignalProducer<Value, Error: ErrorType> {
 	/// complete. Upon failure, the started signal will fail with the error that
 	/// occurred.
 	public static func attempt(operation: () -> Result<Value, Error>) -> SignalProducer {
-		return self.init { observer, _ in
+		return self.init { observer, disposalTrigger in
+			disposalTrigger.observeCompleted(observer.sendInterrupted)
 			operation().analysis(ifSuccess: { value in
 				observer.sendNext(value)
 				observer.sendCompleted()
@@ -426,7 +445,7 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	private func liftRight<U, F, V, G>(transform: Signal<Value, Error> -> Signal<U, F> -> Signal<V, G>) -> SignalProducer<U, F> -> SignalProducer<V, G> {
 		return { otherProducer in
-			return SignalProducer { observer, disposalTrigger in
+			return SignalProducer.compose { observer, disposalTrigger in
 				self.startWithSignalUntil(disposalTrigger) { signal in
 					otherProducer.startWithSignalUntil(disposalTrigger) { otherSignal in
 						transform(signal)(otherSignal).observe(observer)
@@ -443,7 +462,7 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	private func liftLeft<U, F, V, G>(transform: Signal<Value, Error> -> Signal<U, F> -> Signal<V, G>) -> SignalProducer<U, F> -> SignalProducer<V, G> {
 		return { otherProducer in
-			return SignalProducer { observer, disposalTrigger in
+			return SignalProducer.compose { observer, disposalTrigger in
 				otherProducer.startWithSignalUntil(disposalTrigger) { otherSignal in
 					self.startWithSignalUntil(disposalTrigger) { signal in
 						transform(signal)(otherSignal).observe(observer)
@@ -462,7 +481,7 @@ extension SignalProducerType {
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func lift<U, F, V, G>(transform: Signal<Value, Error> -> Signal<U, F> -> Signal<V, G>) -> Signal<U, F> -> SignalProducer<V, G> {
 		return { otherSignal in
-			return SignalProducer { observer, disposalTrigger in
+			return SignalProducer.compose { observer, disposalTrigger in
 				let (wrapperSignal, otherSignalObserver) = Signal<U, F>.pipe()
 
 				// Avoid memory leak caused by the direct use of the given signal.
@@ -991,7 +1010,7 @@ extension SignalProducerType {
 	/// Injects side effects to be performed upon the specified signal events.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func on(started started: (() -> Void)? = nil, event: (Event<Value, Error> -> Void)? = nil, failed: (Error -> Void)? = nil, completed: (() -> Void)? = nil, interrupted: (() -> Void)? = nil, terminated: (() -> Void)? = nil, disposed: (() -> Void)? = nil, next: (Value -> Void)? = nil) -> SignalProducer<Value, Error> {
-		return SignalProducer { observer, disposalTrigger in
+		return SignalProducer.compose { observer, disposalTrigger in
 			started?()
 			self.startWithSignalUntil(disposalTrigger) { signal in
 				_ = disposed.map(disposalTrigger.observeCompleted)
@@ -1018,7 +1037,7 @@ extension SignalProducerType {
 	/// the `start()` method is run.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func startOn(scheduler: SchedulerType) -> SignalProducer<Value, Error> {
-		return SignalProducer { observer, disposalTrigger in
+		return SignalProducer.compose { observer, disposalTrigger in
 			let disposable = scheduler.schedule {
 				self.startWithSignal { signal, interrupter in
 					disposalTrigger.observeTerminated(interrupter)
@@ -1234,7 +1253,7 @@ extension SignalProducerType {
 			return producer
 		}
 
-		return SignalProducer { observer, disposalTrigger in
+		return SignalProducer.compose { observer, disposalTrigger in
 			func iterate(current: Int) {
 				self.startWithSignalUntil(disposalTrigger) { signal in
 					signal.observe { event in
@@ -1276,7 +1295,7 @@ extension SignalProducerType {
 	/// events will be be forwarded. All values sent from `producer` are ignored.
 	@warn_unused_result(message="Did you forget to call `start` on the producer?")
 	public func then<U>(replacement: SignalProducer<U, Error>) -> SignalProducer<U, Error> {
-		return SignalProducer<U, Error> { observer, disposalTrigger in
+		return SignalProducer<U, Error>.compose { observer, disposalTrigger in
 			self.startWithSignalUntil(disposalTrigger) { signal in
 				signal.observe { event in
 					switch event {
@@ -1378,7 +1397,7 @@ extension SignalProducerType {
 		// This is necessary because `struct`s don't have `deinit`.
 		let token = DeallocationToken()
 
-		return SignalProducer { observer, disposalTrigger in
+		return SignalProducer.compose { observer, disposalTrigger in
 			var token: DeallocationToken? = token
 			let initializedProducer: SignalProducer<Value, Error>
 			let initializedObserver: SignalProducer<Value, Error>.ProducedSignal.Observer
