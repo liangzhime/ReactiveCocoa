@@ -21,54 +21,6 @@ private let finalOtherPropertyValue = "FinalOtherValue"
 
 class PropertySpec: QuickSpec {
 	override func spec() {
-		describe("ConstantProperty") {
-			it("should have the value given at initialization") {
-				let constantProperty = Property(value: initialPropertyValue)
-
-				expect(constantProperty.value) == initialPropertyValue
-			}
-
-			it("should yield a signal that interrupts observers without emitting any value.") {
-				let constantProperty = Property(value: initialPropertyValue)
-
-				var signalInterrupted = false
-				var hasUnexpectedEventsEmitted = false
-
-				constantProperty.signal.observe { event in
-					switch event {
-					case .interrupted:
-						signalInterrupted = true
-					case .next, .failed, .completed:
-						hasUnexpectedEventsEmitted = true
-					}
-				}
-
-				expect(signalInterrupted) == true
-				expect(hasUnexpectedEventsEmitted) == false
-			}
-
-			it("should yield a producer that sends the current value then completes") {
-				let constantProperty = Property(value: initialPropertyValue)
-
-				var sentValue: String?
-				var signalCompleted = false
-
-				constantProperty.producer.start { event in
-					switch event {
-					case let .next(value):
-						sentValue = value
-					case .completed:
-						signalCompleted = true
-					case .failed, .interrupted:
-						break
-					}
-				}
-
-				expect(sentValue) == initialPropertyValue
-				expect(signalCompleted) == true
-			}
-		}
-
 		describe("MutableProperty") {
 			it("should have the value given at initialization") {
 				let mutableProperty = MutableProperty(initialPropertyValue)
@@ -297,6 +249,54 @@ class PropertySpec: QuickSpec {
 		}
 
 		describe("Property") {
+			describe("from a value") {
+				it("should have the value given at initialization") {
+					let constantProperty = Property(value: initialPropertyValue)
+
+					expect(constantProperty.value) == initialPropertyValue
+				}
+
+				it("should yield a signal that interrupts observers without emitting any value.") {
+					let constantProperty = Property(value: initialPropertyValue)
+
+					var signalInterrupted = false
+					var hasUnexpectedEventsEmitted = false
+
+					constantProperty.signal.observe { event in
+						switch event {
+						case .interrupted:
+							signalInterrupted = true
+						case .next, .failed, .completed:
+							hasUnexpectedEventsEmitted = true
+						}
+					}
+
+					expect(signalInterrupted) == true
+					expect(hasUnexpectedEventsEmitted) == false
+				}
+
+				it("should yield a producer that sends the current value then completes") {
+					let constantProperty = Property(value: initialPropertyValue)
+
+					var sentValue: String?
+					var signalCompleted = false
+
+					constantProperty.producer.start { event in
+						switch event {
+						case let .next(value):
+							sentValue = value
+						case .completed:
+							signalCompleted = true
+						case .failed, .interrupted:
+							break
+						}
+					}
+
+					expect(sentValue) == initialPropertyValue
+					expect(signalCompleted) == true
+				}
+			}
+
 			describe("from a PropertyProtocol") {
 				it("should pass through behaviors of the input property") {
 					let constantProperty = Property(value: initialPropertyValue)
@@ -415,6 +415,45 @@ class PropertySpec: QuickSpec {
 						}
 					}
 				}
+
+				describe("Property.capture") {
+					it("should not capture intermediate properties but only the ultimate sources") {
+						func increment(input: Int) -> Int {
+							return input + 1
+						}
+
+						weak var weakSourceProperty: MutableProperty<Int>?
+						weak var weakPropertyA: Property<Int>?
+						weak var weakPropertyB: Property<Int>?
+						weak var weakPropertyC: Property<Int>?
+
+						var finalProperty: Property<Int>!
+
+						func scope() {
+							let property = MutableProperty(1)
+							weakSourceProperty = property
+
+							let propertyA = property.map(increment)
+							weakPropertyA = propertyA
+
+							let propertyB = propertyA.map(increment)
+							weakPropertyB = propertyB
+
+							let propertyC = propertyB.map(increment)
+							weakPropertyC = propertyC
+
+							finalProperty = propertyC.map(increment)
+						}
+
+						scope()
+
+						expect(finalProperty.value) == 5
+						expect(weakSourceProperty).toNot(beNil())
+						expect(weakPropertyA).to(beNil())
+						expect(weakPropertyB).to(beNil())
+						expect(weakPropertyC).to(beNil())
+					}
+				}
 			}
 
 			describe("from a value and SignalProducer") {
@@ -438,7 +477,7 @@ class PropertySpec: QuickSpec {
 					var signalInterrupted = false
 
 					let (signal, observer) = Signal<Int, NoError>.pipe()
-					var property: AnyProperty<Int>? = Property(initial: 1,
+					var property: Property<Int>? = Property(initial: 1,
 					                                           then: SignalProducer(signal: signal))
 					let propertySignal = property!.signal
 
@@ -486,7 +525,7 @@ class PropertySpec: QuickSpec {
 					var signalInterrupted = false
 
 					let (signal, observer) = Signal<Int, NoError>.pipe()
-					var property: AnyProperty<Int>? = Property(initial: 1,
+					var property: Property<Int>? = Property(initial: 1,
 					                                           then: signal)
 					let propertySignal = property!.signal
 
@@ -614,6 +653,93 @@ class PropertySpec: QuickSpec {
 					expect(result) == finalResult
 				}
 
+				it("should be consistent between its cached value and its values producer") {
+					var firstResult: String!
+					var secondResult: String!
+
+					let zippedProperty = property.zip(with: otherProperty)
+					zippedProperty.producer.startWithNext { (left, right) in firstResult = left + right }
+
+					func getValue() -> String {
+						return zippedProperty.value.0 + zippedProperty.value.1
+					}
+
+					expect(getValue()) == initialPropertyValue + initialOtherPropertyValue
+					expect(firstResult) == initialPropertyValue + initialOtherPropertyValue
+
+					property.value = subsequentPropertyValue
+					expect(getValue()) == initialPropertyValue + initialOtherPropertyValue
+					expect(firstResult) == initialPropertyValue + initialOtherPropertyValue
+
+					// It should still be the tuple with initial property values,
+					// since `otherProperty` isn't changed yet.
+					zippedProperty.producer.startWithNext { (left, right) in secondResult = left + right }
+
+					// Got `SubsequentValue + InitialOtherValue` instead.
+					expect(secondResult) == initialPropertyValue + initialOtherPropertyValue
+
+					otherProperty.value = subsequentOtherPropertyValue
+					expect(getValue()) == subsequentPropertyValue + subsequentOtherPropertyValue
+					expect(firstResult) == subsequentPropertyValue + subsequentOtherPropertyValue
+
+					// Got `SubsequentValue + InitialOtherValue` instead.
+					expect(secondResult) == subsequentPropertyValue + subsequentOtherPropertyValue
+				}
+
+				it("should be consistent between nested zipped properties") {
+					let A = MutableProperty(1)
+					let B = MutableProperty(100)
+					let C = MutableProperty(10000)
+
+					var firstResult: Int!
+
+					let zipped = A.zip(with: B)
+					zipped.producer.startWithNext { (left, right) in firstResult = left + right }
+
+					func getValue() -> Int {
+						return zipped.value.0 + zipped.value.1
+					}
+
+					/// Initial states
+					expect(getValue()) == 101
+					expect(firstResult) == 101
+
+					A.value = 2
+					expect(getValue()) == 101
+					expect(firstResult) == 101
+
+					B.value = 200
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Setup
+					A.value = 3
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Zip another property now.
+					var secondResult: Int!
+					let anotherZipped = zipped.zip(with: C)
+					anotherZipped.producer.startWithNext { (left, right) in secondResult = (left.0 + left.1) + right }
+
+					func getAnotherValue() -> Int {
+						return (anotherZipped.value.0.0 + anotherZipped.value.0.1) + anotherZipped.value.1
+					}
+
+					/// Since `zipped` is 202 now, and `C` is 10000,
+					/// shouldn't this be 10202?
+
+					/// Verify `zipped` again.
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Then... well, no. Surprise! (Only before #3042)
+					/// We get 10203 here.
+					///
+					/// https://github.com/ReactiveCocoa/ReactiveCocoa/pull/3042
+					expect(getAnotherValue()) == 10202
+				}
+
 				it("should complete its producer only when the source properties are deinitialized") {
 					var result: [String] = []
 					var completed = false
@@ -654,7 +780,7 @@ class PropertySpec: QuickSpec {
 
 				describe("combinePrevious") {
 					it("should pack the current value and the previous value a tuple") {
-						let transformedProperty = property.combinePrevious(initial: initialPropertyValue)
+						let transformedProperty = property.combinePrevious(initialPropertyValue)
 
 						expect(transformedProperty.value.0) == initialPropertyValue
 						expect(transformedProperty.value.1) == initialPropertyValue
@@ -674,7 +800,7 @@ class PropertySpec: QuickSpec {
 						var result: (String, String)?
 						var completed = false
 
-						var transformedProperty = Optional(property.combinePrevious(initial: initialPropertyValue))
+						var transformedProperty = Optional(property.combinePrevious(initialPropertyValue))
 						transformedProperty!.producer.start { event in
 							switch event {
 							case let .next(tuple):
