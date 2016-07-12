@@ -50,6 +50,14 @@ public final class DynamicProperty<Value>: MutablePropertyProtocol {
 		return property?.signal ?? .empty
 	}
 
+	public var lifetime: Signal<(), NoError> {
+		return property?.lifetime ?? .empty
+	}
+
+	public var lifetimeProducer: SignalProducer<(), NoError> {
+		return property?.lifetimeProducer ?? .interrupted
+	}
+
 	/// Initializes a property that will observe and set the given key path of
 	/// the given object. `object` must support weak references!
 	private init<Representatable: ObjectiveCRepresentable where Representatable.Value == Value>(object: NSObject?, keyPath: String, representable: Representatable.Type) {

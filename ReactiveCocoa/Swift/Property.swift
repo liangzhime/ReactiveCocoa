@@ -5,7 +5,7 @@ import enum Result.NoError
 ///
 /// Only classes can conform to this protocol, because having a signal
 /// for changes over time implies the origin must have a unique identity.
-public protocol PropertyProtocol: class {
+public protocol PropertyProtocol: LifetimeProviding {
 	associatedtype Value
 
 	/// The current value of the property.
@@ -306,6 +306,9 @@ public class AnyProperty<Value>: PropertyProtocol {
 	private let _value: () -> Value
 	private let _producer: () -> SignalProducer<Value, NoError>
 	private let _signal: () -> Signal<Value, NoError>
+	private let _lifetime: () -> Signal<(), NoError>
+	private let _lifetimeProducer: () -> SignalProducer<(), NoError>
+
 
 	/// The current value of the property.
 	public var value: Value {
@@ -327,6 +330,22 @@ public class AnyProperty<Value>: PropertyProtocol {
 		return _signal()
 	}
 
+	/// A signal representing the lifetime of the property.
+	///
+	/// The signal emits `completed` when the property completes, or
+	/// `interrupted` after the property is completed.
+	public var lifetime: Signal<(), NoError> {
+		return _lifetime()
+	}
+
+	/// An interruptible observation to the lifetime of the property.
+	///
+	/// The signal emits `completed` when the property completes, or
+	/// `interrupted` after the property is completed.
+	public var lifetimeProducer: SignalProducer<(), NoError> {
+		return _lifetimeProducer()
+	}
+
 	/// Initializes a property as a read-only view of the given property.
 	public init<P: PropertyProtocol where P.Value == Value>(_ property: P) {
 		sources = AnyProperty.capture(property)
@@ -334,26 +353,29 @@ public class AnyProperty<Value>: PropertyProtocol {
 		_value = { property.value }
 		_producer = { property.producer }
 		_signal = { property.signal }
+		_lifetime = { property.lifetime }
+		_lifetimeProducer = { property.lifetimeProducer }
 	}
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on a signal created by `producer`.
 	public convenience init(initial: Value, then producer: SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: producer.prefix(value: initial),
+		          lifetimeProducer: producer.materialize().skip { !$0.isTerminating }.dematerialize().map { _ in },
 		          capturing: [])
 	}
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on `signal`.
 	public convenience init(initial: Value, then signal: Signal<Value, NoError>) {
-		self.init(unsafeProducer: SignalProducer(signal: signal).prefix(value: initial),
-		          capturing: [])
+		self.init(initial: initial, then: SignalProducer(signal: signal))
 	}
 
 	/// Initializes a property by applying the unary `SignalProducer` transform on
 	/// `property`. The resulting property captures `property`.
 	private convenience init<P: PropertyProtocol>(_ property: P, transform: @noescape (SignalProducer<P.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(property.producer),
+		          lifetimeProducer: property.lifetimeProducer,
 		          capturing: AnyProperty.capture(property))
 	}
 
@@ -362,6 +384,7 @@ public class AnyProperty<Value>: PropertyProtocol {
 	/// the two property sources.
 	private convenience init<P1: PropertyProtocol, P2: PropertyProtocol>(_ firstProperty: P1, _ secondProperty: P2, transform: @noescape (SignalProducer<P1.Value, NoError>) -> (SignalProducer<P2.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(firstProperty.producer)(secondProperty.producer),
+		          lifetimeProducer: firstProperty.lifetimeProducer.zip(with: secondProperty.lifetimeProducer).map { _ in },
 		          capturing: AnyProperty.capture(firstProperty) + AnyProperty.capture(secondProperty))
 	}
 
@@ -371,7 +394,7 @@ public class AnyProperty<Value>: PropertyProtocol {
 	///
 	/// The producer and the signal of the created property would complete only
 	/// when the `unsafeProducer` completes.
-	private init(unsafeProducer: SignalProducer<Value, NoError>, capturing sources: [Any]) {
+	private init(unsafeProducer: SignalProducer<Value, NoError>, lifetimeProducer: SignalProducer<(), NoError>, capturing sources: [Any]) {
 		var value: Value!
 
 		let observerDisposable = unsafeProducer.start { event in
@@ -398,6 +421,12 @@ public class AnyProperty<Value>: PropertyProtocol {
 				unsafeProducer.startWithSignal { signal, _ in extractedSignal = signal }
 				return extractedSignal
 			}
+			_lifetime = {
+				var extractedSignal: Signal<(), NoError>!
+				lifetimeProducer.startWithSignal { signal, _ in extractedSignal = signal }
+				return extractedSignal
+			}
+			_lifetimeProducer = { lifetimeProducer }
 		} else {
 			fatalError("A producer promised to send at least one value. Received none.")
 		}
@@ -421,12 +450,16 @@ public class ConstantProperty<Value>: PropertyProtocol {
 	public let value: Value
 	public let producer: SignalProducer<Value, NoError>
 	public let signal: Signal<Value, NoError>
+	public let lifetime: Signal<(), NoError>
+	public let lifetimeProducer: SignalProducer<(), NoError>
 
 	/// Initializes the property to have the given value.
 	public init(_ value: Value) {
 		self.value = value
 		self.producer = SignalProducer(value: value)
 		self.signal = .empty
+		self.lifetime = .empty
+		self.lifetimeProducer = .interrupted
 	}
 }
 
@@ -463,6 +496,22 @@ public final class MutableProperty<Value>: MutablePropertyProtocol {
 	/// then complete when the property has deinitialized.
 	public let signal: Signal<Value, NoError>
 
+	/// A signal representing the lifetime of the property.
+	///
+	/// The signal emits `completed` when the property completes, or
+	/// `interrupted` after the property is completed.
+	public let lifetime: Signal<(), NoError>
+
+	/// An interruptible observation to the lifetime of the property.
+	///
+	/// The signal emits `completed` when the property completes, or
+	/// `interrupted` after the property is completed.
+	public var lifetimeProducer: SignalProducer<(), NoError> {
+		return SignalProducer(signal: lifetime)
+	}
+
+	private let lifetimeObserver: Signal<(), NoError>.Observer
+
 	/// A producer for Signals that will send the property's current value,
 	/// followed by all changes over time, then complete when the property has
 	/// deinitialized.
@@ -489,6 +538,7 @@ public final class MutableProperty<Value>: MutablePropertyProtocol {
 
 		box = Box(initialValue)
 		(signal, observer) = Signal.pipe()
+		(lifetime, lifetimeObserver) = Signal.pipe()
 	}
 
 	/// Atomically replaces the contents of the variable.
@@ -525,6 +575,7 @@ public final class MutableProperty<Value>: MutablePropertyProtocol {
 
 	deinit {
 		observer.sendCompleted()
+		lifetimeObserver.sendCompleted()
 	}
 }
 
