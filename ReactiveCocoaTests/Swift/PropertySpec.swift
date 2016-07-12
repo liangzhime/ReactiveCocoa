@@ -335,7 +335,7 @@ class PropertySpec: QuickSpec {
 					expect(signalInterrupted) == true
 				}
 
-				describe("transformed properties") {
+				describe("composed properties") {
 					it("should have the latest value available before sending any value") {
 						var latestValue: Int!
 
@@ -377,6 +377,39 @@ class PropertySpec: QuickSpec {
 						let transformedProperty = property.map { $0 + 1 }
 
 						expect(transformedProperty.value) == 2
+					}
+
+					it("should allow the intermediate properties to deinitialize") {
+						let property = MutableProperty(1)
+						weak var firstIntermediate: AnyProperty<Int>?
+						weak var secondIntermediate: AnyProperty<Int>?
+						weak var thirdIntermediate: AnyProperty<Int>?
+
+						func map<P: PropertyProtocol where P.Value == Int>(_ property: P, _ weakRef: inout AnyProperty<Int>?) -> AnyProperty<Int> {
+							let mapped = property.map { $0 + 1 }
+							weakRef = mapped
+							return mapped
+						}
+
+						func scope() -> SignalProducer<Int, NoError> {
+							let p1 = map(property, &firstIntermediate)
+							let p2 = map(p1, &secondIntermediate)
+							let p3 = map(p2, &thirdIntermediate)
+							return p3.producer
+						}
+
+						var result: Int!
+						scope().startWithNext { value in
+							result = value
+						}
+
+						expect(result) == 4
+						expect(firstIntermediate).to(beNil())
+						expect(secondIntermediate).to(beNil())
+						expect(thirdIntermediate).to(beNil())
+
+						property.value = 5
+						expect(result) == 8
 					}
 
 					describe("signal lifetime and producer lifetime") {
@@ -570,6 +603,80 @@ class PropertySpec: QuickSpec {
 					otherProperty = nil
 					expect(completed) == true
 				}
+
+				it("should be consistent between its cached value and its values producer") {
+					var firstResult: String!
+					var secondResult: String!
+
+					let combined = property.combineLatest(with: otherProperty)
+					combined.producer.startWithNext { (left, right) in firstResult = left + right }
+
+					func getValue() -> String {
+						return combined.value.0 + combined.value.1
+					}
+
+					expect(getValue()) == initialPropertyValue + initialOtherPropertyValue
+					expect(firstResult) == initialPropertyValue + initialOtherPropertyValue
+
+					property.value = subsequentPropertyValue
+					expect(getValue()) == subsequentPropertyValue + initialOtherPropertyValue
+					expect(firstResult) == subsequentPropertyValue + initialOtherPropertyValue
+
+					combined.producer.startWithNext { (left, right) in secondResult = left + right }
+					expect(secondResult) == subsequentPropertyValue + initialOtherPropertyValue
+
+					otherProperty.value = subsequentOtherPropertyValue
+					expect(getValue()) == subsequentPropertyValue + subsequentOtherPropertyValue
+					expect(firstResult) == subsequentPropertyValue + subsequentOtherPropertyValue
+					expect(secondResult) == subsequentPropertyValue + subsequentOtherPropertyValue
+				}
+
+				it("should be consistent between nested combined properties") {
+					let A = MutableProperty(1)
+					let B = MutableProperty(100)
+					let C = MutableProperty(10000)
+
+					var firstResult: Int!
+
+					let combined = A.combineLatest(with: B)
+					combined.producer.startWithNext { (left, right) in firstResult = left + right }
+
+					func getValue() -> Int {
+						return combined.value.0 + combined.value.1
+					}
+
+					/// Initial states
+					expect(getValue()) == 101
+					expect(firstResult) == 101
+
+					A.value = 2
+					expect(getValue()) == 102
+					expect(firstResult) == 102
+
+					B.value = 200
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Setup
+					A.value = 3
+					expect(getValue()) == 203
+					expect(firstResult) == 203
+
+					/// Zip another property now.
+					var secondResult: Int!
+					let anotherCombined = combined.combineLatest(with: C)
+					anotherCombined.producer.startWithNext { (left, right) in secondResult = (left.0 + left.1) + right }
+
+					func getAnotherValue() -> Int {
+						return (anotherCombined.value.0.0 + anotherCombined.value.0.1) + anotherCombined.value.1
+					}
+
+					expect(getAnotherValue()) == 10203
+
+					A.value = 4
+					expect(getValue()) == 204
+					expect(getAnotherValue()) == 10204
+				}
 			}
 
 			describe("zip") {
@@ -695,6 +802,70 @@ class PropertySpec: QuickSpec {
 					///
 					/// https://github.com/ReactiveCocoa/ReactiveCocoa/pull/3042
 					expect(getAnotherValue()) == 10202
+				}
+
+				it("should be consistent between combined and nested zipped properties") {
+					let A = MutableProperty(1)
+					let B = MutableProperty(100)
+					let C = MutableProperty(10000)
+					let D = MutableProperty(1000000)
+
+					var firstResult: Int!
+
+					let zipped = A.zip(with: B)
+					zipped.producer.startWithNext { (left, right) in firstResult = left + right }
+
+					func getValue() -> Int {
+						return zipped.value.0 + zipped.value.1
+					}
+
+					/// Initial states
+					expect(getValue()) == 101
+					expect(firstResult) == 101
+
+					A.value = 2
+					expect(getValue()) == 101
+					expect(firstResult) == 101
+
+					B.value = 200
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Setup
+					A.value = 3
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					/// Zip another property now.
+					var secondResult: Int!
+					let anotherZipped = zipped.zip(with: C)
+					anotherZipped.producer.startWithNext { (left, right) in secondResult = (left.0 + left.1) + right }
+
+					func getAnotherValue() -> Int {
+						return (anotherZipped.value.0.0 + anotherZipped.value.0.1) + anotherZipped.value.1
+					}
+
+					/// Verify `zipped` again.
+					expect(getValue()) == 202
+					expect(firstResult) == 202
+
+					expect(getAnotherValue()) == 10202
+
+					/// Zip `D` with `anotherZipped`.
+					let yetAnotherZipped = anotherZipped.zip(with: D)
+
+					/// Combine with another property.
+					/// (((Int, Int), Int), (((Int, Int), Int), Int))
+					let combined = anotherZipped.combineLatest(with: yetAnotherZipped)
+
+					var thirdResult: Int!
+					combined.producer.startWithNext { (left, right) in
+						let leftResult = left.0.0 + left.0.1 + left.1
+						let rightResult = right.0.0.0 + right.0.0.1 + right.0.1 + right.1
+						thirdResult = leftResult + rightResult
+					}
+
+					expect(thirdResult) == 1020404
 				}
 
 				it("should complete its producer only when the source properties are deinitialized") {

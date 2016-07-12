@@ -221,10 +221,10 @@ extension PropertyProtocol {
 
 extension AnyProperty {
 	@available(*, unavailable, renamed:"AnyProperty(initial:then:)")
-	public init(initialValue: Value, producer: SignalProducer<Value, NoError>) { fatalError() }
+	public convenience init(initialValue: Value, producer: SignalProducer<Value, NoError>) { fatalError() }
 
 	@available(*, unavailable, renamed:"AnyProperty(initial:then:)")
-	public init(initialValue: Value, signal: Signal<Value, NoError>) { fatalError() }
+	public convenience init(initialValue: Value, signal: Signal<Value, NoError>) { fatalError() }
 }
 
 extension DateSchedulerProtocol {

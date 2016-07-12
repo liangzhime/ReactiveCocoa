@@ -298,7 +298,7 @@ extension PropertyProtocol {
 }
 
 /// A read-only property that allows observation of its changes.
-public struct AnyProperty<Value>: PropertyProtocol {
+public class AnyProperty<Value>: PropertyProtocol {
 	private let sources: [Any]
 
 	private let _value: () -> Value
@@ -336,21 +336,21 @@ public struct AnyProperty<Value>: PropertyProtocol {
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on a signal created by `producer`.
-	public init(initial: Value, then producer: SignalProducer<Value, NoError>) {
+	public convenience init(initial: Value, then producer: SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: producer.prefix(value: initial),
 		          capturing: [])
 	}
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on `signal`.
-	public init(initial: Value, then signal: Signal<Value, NoError>) {
+	public convenience init(initial: Value, then signal: Signal<Value, NoError>) {
 		self.init(unsafeProducer: SignalProducer(signal: signal).prefix(value: initial),
 		          capturing: [])
 	}
 
 	/// Initializes a property by applying the unary `SignalProducer` transform on
 	/// `property`. The resulting property captures `property`.
-	private init<P: PropertyProtocol>(_ property: P, transform: @noescape (SignalProducer<P.Value, NoError>) -> SignalProducer<Value, NoError>) {
+	private convenience init<P: PropertyProtocol>(_ property: P, transform: @noescape (SignalProducer<P.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(property.producer),
 		          capturing: [property])
 	}
@@ -358,7 +358,7 @@ public struct AnyProperty<Value>: PropertyProtocol {
 	/// Initializes a property by applying the binary `SignalProducer` transform on
 	/// `firstProperty` and `secondProperty`. The resulting property captures
 	/// the two property sources.
-	private init<P1: PropertyProtocol, P2: PropertyProtocol>(_ firstProperty: P1, _ secondProperty: P2, transform: @noescape (SignalProducer<P1.Value, NoError>) -> (SignalProducer<P2.Value, NoError>) -> SignalProducer<Value, NoError>) {
+	private convenience init<P1: PropertyProtocol, P2: PropertyProtocol>(_ firstProperty: P1, _ secondProperty: P2, transform: @noescape (SignalProducer<P1.Value, NoError>) -> (SignalProducer<P2.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(firstProperty.producer)(secondProperty.producer),
 		          capturing: [firstProperty, secondProperty])
 	}
