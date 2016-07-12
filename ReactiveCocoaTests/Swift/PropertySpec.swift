@@ -395,6 +395,9 @@ class PropertySpec: QuickSpec {
 							let p1 = map(property, &firstIntermediate)
 							let p2 = map(p1, &secondIntermediate)
 							let p3 = map(p2, &thirdIntermediate)
+							expect(firstIntermediate).toNot(beNil())
+							expect(secondIntermediate).toNot(beNil())
+							expect(thirdIntermediate).toNot(beNil())
 							return p3.producer
 						}
 
