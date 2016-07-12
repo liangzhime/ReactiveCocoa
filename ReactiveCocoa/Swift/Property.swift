@@ -2,7 +2,10 @@ import Foundation
 import enum Result.NoError
 
 /// Represents a property that allows observation of its changes.
-public protocol PropertyProtocol {
+///
+/// Only classes can conform to this protocol, because having a signal
+/// for changes over time implies the origin must have a unique identity.
+public protocol PropertyProtocol: class {
 	associatedtype Value
 
 	/// The current value of the property.
@@ -21,9 +24,9 @@ public protocol PropertyProtocol {
 
 /// Represents an observable property that can be mutated directly.
 ///
-/// Only classes can conform to this protocol, because instances must support
-/// weak references (and value types currently do not).
-public protocol MutablePropertyProtocol: class, PropertyProtocol {
+/// Only classes can conform to this protocol, because having a signal
+/// for changes over time implies the origin must have a unique identity.
+public protocol MutablePropertyProtocol: PropertyProtocol {
 	/// The current value of the property.
 	var value: Value { get set }
 }
@@ -296,7 +299,7 @@ extension PropertyProtocol {
 }
 
 /// A read-only, type-erased view of a property.
-public struct AnyProperty<Value>: PropertyProtocol {
+public class AnyProperty<Value>: PropertyProtocol {
 	private let sources: [Any]
 	private let disposable: Disposable?
 
@@ -335,21 +338,21 @@ public struct AnyProperty<Value>: PropertyProtocol {
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on a signal created by `producer`.
-	public init(initial: Value, then producer: SignalProducer<Value, NoError>) {
+	public convenience init(initial: Value, then producer: SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: producer.prefix(value: initial),
 		          capturing: [])
 	}
 
 	/// Initializes a property that first takes on `initial`, then each value
 	/// sent on `signal`.
-	public init(initial: Value, then signal: Signal<Value, NoError>) {
+	public convenience init(initial: Value, then signal: Signal<Value, NoError>) {
 		self.init(unsafeProducer: SignalProducer(signal: signal).prefix(value: initial),
 		          capturing: [])
 	}
 
 	/// Initializes a property by applying the unary `SignalProducer` transform on
 	/// `property`. The resulting property captures `property`.
-	private init<P: PropertyProtocol>(_ property: P, transform: @noescape (SignalProducer<P.Value, NoError>) -> SignalProducer<Value, NoError>) {
+	private convenience init<P: PropertyProtocol>(_ property: P, transform: @noescape (SignalProducer<P.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(property.producer),
 		          capturing: AnyProperty.capture(property))
 	}
@@ -357,7 +360,7 @@ public struct AnyProperty<Value>: PropertyProtocol {
 	/// Initializes a property by applying the binary `SignalProducer` transform on
 	/// `firstProperty` and `secondProperty`. The resulting property captures
 	/// the two property sources.
-	private init<P1: PropertyProtocol, P2: PropertyProtocol>(_ firstProperty: P1, _ secondProperty: P2, transform: @noescape (SignalProducer<P1.Value, NoError>) -> (SignalProducer<P2.Value, NoError>) -> SignalProducer<Value, NoError>) {
+	private convenience init<P1: PropertyProtocol, P2: PropertyProtocol>(_ firstProperty: P1, _ secondProperty: P2, transform: @noescape (SignalProducer<P1.Value, NoError>) -> (SignalProducer<P2.Value, NoError>) -> SignalProducer<Value, NoError>) {
 		self.init(unsafeProducer: transform(firstProperty.producer)(secondProperty.producer),
 		          capturing: AnyProperty.capture(firstProperty) + AnyProperty.capture(secondProperty))
 	}
@@ -413,7 +416,7 @@ public struct AnyProperty<Value>: PropertyProtocol {
 }
 
 /// A property that never changes.
-public struct ConstantProperty<Value>: PropertyProtocol {
+public class ConstantProperty<Value>: PropertyProtocol {
 
 	public let value: Value
 	public let producer: SignalProducer<Value, NoError>
